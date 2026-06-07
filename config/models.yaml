@@ -1,0 +1,12 @@
+# AgriMeshAI — Model Configuration
+# Ollama quản lý file model (~/.ollama/models/blobs/)
+# File này chỉ tham chiếu tên model
+
+llm:
+  provider: ollama
+  model: qwen2.5:1.5b
+  api_url: http://localhost:11434/v1
+  # api_url: http://localhost:11434/v1  # Ollama mặc định
+  max_tokens: 4096
+  temperature: 0.2
+  keep_alive: 5m  # giữ model trong RAM 5 phút sau khi dùng
