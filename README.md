@@ -90,12 +90,32 @@ Interact with your farm using everyday language:
 
 ```
 AgriMeshAI/
+├── config/
+│   └── models.yaml           
 ├── doc/
 │   ├── assets/
 │   │   └── system_architecture.png
-│   └── system-design.md       # Full system design document (Vietnamese)
-├── LICENSE
-└── README.md
+│   └── system-design.md     
+├── scripts/
+│   └── setup.sh            
+├── README.md
+└── requirements.txt      
+```
+
+---
+
+## Pre-prepare
+
+### 1. Install Ollama & pull LLM model
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:1.5b
+```
+### 2. Run setup
+
+```bash
+./scripts/setup.sh
 ```
 
 ---
