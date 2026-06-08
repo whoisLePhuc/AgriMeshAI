@@ -30,6 +30,7 @@ from mcp.types import (
 from mcp_server.event_bus import EventBus
 from mcp_server.gateway.aggregator import Aggregator
 from rule_engine import RuleEngine
+from notifier import NotifierManager
 from device_manager.src.discovery import DiscoveryResult, discover_devices
 from mcp_server.gateway.fleet import FleetTools
 from mcp_server.gateway.recorder import run_recorder
@@ -67,6 +68,7 @@ class AgriMeshAIServer:
         self._daemon_active = False
         self._bus = EventBus()
         self._rule_engine = None
+        self._notifier = None
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -226,6 +228,12 @@ class AgriMeshAIServer:
             rules_path=str(Path(__file__).parent.parent.parent / "config" / "rules.yaml"),
         )
         logger.info("rule engine: %d rule(s) loaded", len(self._rule_engine.rules))
+
+        # Wire up notifier manager (auto-subscribes to alert_triggered)
+        notifier_path = str(
+            Path(__file__).parent.parent.parent / "config" / "notifiers.yaml"
+        )
+        self._notifier = NotifierManager(self._bus, config_path=notifier_path)
 
         return discovery
 
@@ -450,3 +458,8 @@ class AgriMeshAIServer:
     def rule_engine(self):
         """Rule engine instance (initialized after start())."""
         return self._rule_engine
+
+    @property
+    def notifier(self):
+        """Notifier manager instance (initialized after start())."""
+        return self._notifier
