@@ -5,6 +5,7 @@ Integrates with recorder, discovery, aggregator.
 
 import os
 import json
+import hashlib
 import yaml
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
@@ -58,7 +59,7 @@ def create_server(recorder: Recorder, profiles_dir: str = PROFILES_DIR):
             val = float(device_result.data.strip())
             device_name = name.split(".")[0]
             await recorder.record_reading(
-                node_id=hash(device_name) % 1000,
+                node_id=int(hashlib.md5(device_name.encode()).hexdigest()[:8], 16) % 10000,
                 sensor_id=name.split(".")[1],
                 value=val,
                 unit="",

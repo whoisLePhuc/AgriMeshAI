@@ -4,6 +4,7 @@ Runs in daemon mode (agrimesh daemon), not in stdio mode.
 """
 
 import asyncio
+import hashlib
 import logging
 from mcp_server.aggregator import Aggregator
 from recorder import Recorder
@@ -25,7 +26,7 @@ class BackgroundRecorder:
             model = device.model
             sensors = [t.name for t in model.tools]
             await self.recorder.register_device(
-                node_id=hash(name) % 1000,
+                node_id=int(hashlib.md5(name.encode()).hexdigest()[:8], 16) % 10000,
                 dtype=model.connection.protocol,
                 name=name,
                 location=model.description[:50] if model.description else "",
@@ -80,7 +81,7 @@ class BackgroundRecorder:
                 try:
                     val = float(result.data.strip())
                     await self.recorder.record_reading(
-                        node_id=hash(name) % 1000,
+                        node_id=int(hashlib.md5(name.encode()).hexdigest()[:8], 16) % 10000,
                         sensor_id=tool_def.name,
                         value=val,
                         unit="",
