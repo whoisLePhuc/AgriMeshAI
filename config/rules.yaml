@@ -1,0 +1,81 @@
+# AgriMeshAI — Rule Definitions
+# Evaluated against every sensor reading. Rules are checked in order.
+# Threshold rules are O(1); rate and stuck rules query SQLite history.
+
+rules:
+  # ── Threshold: nhiệt độ ────────────────────────────────────────────────
+  - id: R01
+    name: temperature_high
+    type: threshold
+    sensor_type: temperature
+    operator: ">"
+    value: 40
+    severity: CRITICAL
+    message: "Nhiệt độ {device_id}: {value}°C vượt ngưỡng 40°C"
+
+  - id: R02
+    name: temperature_low
+    type: threshold
+    sensor_type: temperature
+    operator: "<"
+    value: 5
+    severity: CRITICAL
+    message: "Nhiệt độ {device_id}: {value}°C dưới ngưỡng 5°C"
+
+  # ── Threshold: độ ẩm đất ───────────────────────────────────────────────
+  - id: R03
+    name: soil_dry
+    type: threshold
+    sensor_type: moisture
+    operator: "<"
+    value: 20
+    severity: WARNING
+    message: "Độ ẩm {device_id}: {value}% dưới ngưỡng 20% — cần tưới"
+
+  - id: R04
+    name: soil_wet
+    type: threshold
+    sensor_type: moisture
+    operator: ">"
+    value: 80
+    severity: WARNING
+    message: "Độ ẩm {device_id}: {value}% vượt ngưỡng 80% — ngập úng"
+
+  # ── Threshold: độ ẩm không khí ──────────────────────────────────────────
+  - id: R06
+    name: humidity_high
+    type: threshold
+    sensor_type: humidity
+    operator: ">"
+    value: 90
+    severity: WARNING
+    message: "Độ ẩm không khí {device_id}: {value}% — nguy cơ nấm mốc"
+
+  - id: R07
+    name: humidity_low
+    type: threshold
+    sensor_type: humidity
+    operator: "<"
+    value: 30
+    severity: WARNING
+    message: "Độ ẩm không khí {device_id}: {value}% — quá khô, cây dễ stress"
+
+  # ── Threshold: pin ─────────────────────────────────────────────────────
+  - id: R05
+    name: battery_low
+    type: threshold
+    sensor_type: battery
+    operator: "<"
+    value: 20
+    severity: WARNING
+    message: "Pin {device_id}: {value}% dưới 20% — sạc hoặc thay pin"
+
+  # ── Rate of change ────────────────────────────────────────────────────
+  - id: R08
+    name: temp_rising_fast
+    type: rate
+    sensor_type: temperature
+    value: 5              # °C/giờ tối đa
+    window_minutes: 60
+    severity: WARNING
+    message: "Nhiệt độ {device_id} tăng {rate:.1f}°C/giờ — bất thường"
