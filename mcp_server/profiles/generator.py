@@ -23,7 +23,7 @@ def generate_tools(device: DeviceModel) -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": properties,
-                "required": required if required else None,
+                "required": required if required else [],
             },
         ))
     return tools
