@@ -27,6 +27,7 @@ from mcp.types import (
     ToolsCapability,
 )
 
+from mcp_server.event_bus import EventBus
 from mcp_server.gateway.aggregator import Aggregator
 from device_manager.src.discovery import DiscoveryResult, discover_devices
 from mcp_server.gateway.fleet import FleetTools
@@ -48,6 +49,7 @@ class AgriMeshAIServer:
     - Aggregator: unified tool catalog, per-device routing
     - Fleet tools: cross-device queries backed by the store
     - Store: SQLite time-series storage
+    - EventBus: pub/sub for decoupled inter-module communication
     """
 
     def __init__(
@@ -62,6 +64,7 @@ class AgriMeshAIServer:
         self._store: ReadingStore | None = None
         self._server = Server(name="agrimesh", version="0.1.0")
         self._daemon_active = False
+        self._bus = EventBus()
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -162,6 +165,13 @@ class AgriMeshAIServer:
         unit = route.returns.unit or ""
         try:
             await self._store.record(
+                device_id=route.device.name,
+                sensor_id=route.tool_name,
+                value=value,
+                unit=unit,
+            )
+            await self._bus.emit(
+                "reading_recorded",
                 device_id=route.device.name,
                 sensor_id=route.tool_name,
                 value=value,
@@ -369,7 +379,7 @@ class AgriMeshAIServer:
             loop.add_signal_handler(sig, _request_shutdown)
 
         tasks = [
-            run_recorder(self._aggregator, self._store, stop_event),
+            run_recorder(self._aggregator, self._store, stop_event, bus=self._bus),
             self._run_retention_loop(stop_event),
             http_server.serve(),
         ]
@@ -410,3 +420,8 @@ class AgriMeshAIServer:
     @property
     def store(self) -> ReadingStore | None:
         return self._store
+
+    @property
+    def bus(self) -> EventBus:
+        """Application-level event bus for inter-module communication."""
+        return self._bus
