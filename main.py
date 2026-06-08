@@ -37,7 +37,7 @@ def _build_tool_bridge(server, loop: asyncio.AbstractEventLoop) -> list:
     Each tool proxies directly to ``server.handle_call_tool()`` — no
     subprocess, no JSON-RPC, no MCP transport overhead.
     """
-    from edge_agent.tool import Tool as EdgeTool
+    from src.tool import Tool as EdgeTool
     from mcp.types import Tool as MCPTool
 
     mcp_tools: list[MCPTool] = server.handle_list_tools()
@@ -112,9 +112,9 @@ def run_agent(devices_dir: str = "devices", db_path: str = "data/agrimesh.db") -
     model_name = cfg["llm"]["model"]
     base_url = cfg["llm"]["api_url"].rstrip("/v1").rstrip("/")
 
-    from edge_agent import Agent
-    from edge_agent.providers import OllamaProvider
-    from edge_agent.session import Session
+    from src import Agent
+    from src.providers import OllamaProvider
+    from src.session import Session
 
     agent = Agent(
         provider=OllamaProvider(model=model_name, base_url=base_url, temperature=0.01),

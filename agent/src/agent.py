@@ -6,11 +6,11 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
-from edge_agent.logger import get_logger
-from edge_agent.providers.base import Provider
-from edge_agent.template import render_template
-from edge_agent.tool import Tool
-from edge_agent.types import (
+from src.logger import get_logger
+from src.providers.base import Provider
+from src.template import render_template
+from src.tool import Tool
+from src.types import (
     AgentStep,
     Message,
     RunResult,
@@ -20,7 +20,7 @@ from edge_agent.types import (
 )
 
 if TYPE_CHECKING:
-    from edge_agent.mcp import MCPServer
+    from src.mcp import MCPServer
 
 T = TypeVar("T")
 
@@ -89,7 +89,7 @@ class Agent:
 
     @staticmethod
     def _default_provider() -> Provider:
-        from edge_agent.providers.gemini import GeminiProvider
+        from src.providers.gemini import GeminiProvider
         return GeminiProvider()
 
     @staticmethod
@@ -177,7 +177,7 @@ class Agent:
 
         output_schema: dict[str, object] | None = None
         if effective_output_type is not None:
-            from edge_agent.schema import schema_from_dataclass
+            from src.schema import schema_from_dataclass
 
             output_schema = schema_from_dataclass(effective_output_type)
 
@@ -193,7 +193,7 @@ class Agent:
                 output_text = response.content or ""
                 parsed = None
                 if effective_output_type is not None:
-                    from edge_agent.schema import parse_json_to_dataclass
+                    from src.schema import parse_json_to_dataclass
 
                     parsed = parse_json_to_dataclass(
                         effective_output_type, output_text or "{}"
@@ -222,7 +222,7 @@ class Agent:
         last_content = messages[-1].content or ""
         parsed = None
         if effective_output_type is not None:
-            from edge_agent.schema import parse_json_to_dataclass
+            from src.schema import parse_json_to_dataclass
 
             parsed = parse_json_to_dataclass(
                 effective_output_type, last_content or "{}"

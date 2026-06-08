@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from edge_agent.agent import Agent
-from edge_agent.logger import get_logger
-from edge_agent.types import Message
+from src.agent import Agent
+from src.logger import get_logger
+from src.types import Message
 
 
 class Session:

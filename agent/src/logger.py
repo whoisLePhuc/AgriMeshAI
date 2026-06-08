@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-_ROOT_LOGGER_NAME = "edge_agent"
+_ROOT_LOGGER_NAME = "src"
 
 
 def get_logger(name: str) -> logging.Logger:

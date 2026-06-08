@@ -10,7 +10,7 @@ import datetime
 import re
 import urllib.request
 
-from edge_agent.logger import get_logger
+from src.logger import get_logger
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(.+?)\}\}")
 _URL_FETCH_TIMEOUT = 10

@@ -9,11 +9,11 @@ import urllib.request
 import urllib.error
 from typing import Any
 
-from edge_agent.dotenv import load_dotenv
-from edge_agent.logger import get_logger
-from edge_agent.providers.base import Provider
-from edge_agent.tool import Tool
-from edge_agent.types import Message, ToolCall
+from src.dotenv import load_dotenv
+from src.logger import get_logger
+from src.providers.base import Provider
+from src.tool import Tool
+from src.types import Message, ToolCall
 
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 _API_KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")

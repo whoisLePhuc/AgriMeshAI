@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from edge_agent.tool import Tool
-from edge_agent.types import Message
+from src.tool import Tool
+from src.types import Message
 
 
 class Provider(ABC):

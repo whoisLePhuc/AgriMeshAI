@@ -13,8 +13,8 @@ import subprocess
 import threading
 from typing import Any
 
-from edge_agent.logger import get_logger
-from edge_agent.tool import Tool
+from src.logger import get_logger
+from src.tool import Tool
 
 _PROTOCOL_VERSION = "2024-11-05"
 _CLIENT_INFO = {"name": "tinyagent", "version": "0.1.0"}

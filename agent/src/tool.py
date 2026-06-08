@@ -54,7 +54,7 @@ def _build_property_schema(py_type: type) -> dict[str, Any]:
 
     # Dataclass  →  nested object schema
     if isinstance(py_type, type) and dataclasses.is_dataclass(py_type):
-        from edge_agent.schema import schema_from_dataclass
+        from src.schema import schema_from_dataclass
         return schema_from_dataclass(py_type)
 
     # list[X]  →  array with typed items

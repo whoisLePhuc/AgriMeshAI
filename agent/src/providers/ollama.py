@@ -6,11 +6,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from edge_agent.dotenv import load_dotenv
-from edge_agent.logger import get_logger
-from edge_agent.providers.base import Provider
-from edge_agent.tool import Tool
-from edge_agent.types import Message, ToolCall
+from src.dotenv import load_dotenv
+from src.logger import get_logger
+from src.providers.base import Provider
+from src.tool import Tool
+from src.types import Message, ToolCall
 
 _DEFAULT_BASE_URL = "http://localhost:11434"
 _MODEL_ENV_VAR = "OLLAMA_MODEL"

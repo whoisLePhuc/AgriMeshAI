@@ -11,10 +11,10 @@ Supported agent types
 
 from __future__ import annotations
 
-from edge_agent.agent import Agent
-from edge_agent.logger import get_logger
-from edge_agent.tool import Tool
-from edge_agent.types import AgentStep, RunResult
+from src.agent import Agent
+from src.logger import get_logger
+from src.tool import Tool
+from src.types import AgentStep, RunResult
 
 # ── decision containers ─────────────────────────────────────────────────────
 
