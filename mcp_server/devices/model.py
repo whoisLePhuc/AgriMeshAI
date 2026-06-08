@@ -42,6 +42,9 @@ class ConnectionConfig(BaseModel):
     port: str = ""
     baud_rate: int = 115200
     timeout_ms: int = 3000
+    broker: str = "localhost"      # MQTT broker address
+    mqtt_port: int = 1883          # MQTT broker port
+    topic_prefix: str = ""         # MQTT topic prefix
 
 
 class DeviceModel(BaseModel):

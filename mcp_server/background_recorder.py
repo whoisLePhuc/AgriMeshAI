@@ -19,6 +19,21 @@ class BackgroundRecorder:
         self.recorder = recorder
         self._tasks: list[asyncio.Task] = []
 
+    async def register_devices(self):
+        """Register all discovered devices into the SQLite devices table."""
+        for name, device in self.aggregator.devices.items():
+            model = device.model
+            sensors = [t.name for t in model.tools]
+            await self.recorder.register_device(
+                node_id=hash(name) % 1000,
+                dtype=model.connection.protocol,
+                name=name,
+                location=model.description[:50] if model.description else "",
+                sensors=sensors,
+                config={"protocol": model.connection.protocol},
+            )
+        logger.info(f"  Registered {len(self.aggregator.devices)} device(s) to database")
+
     def start(self):
         """Start background polling for all devices with recording enabled."""
         for name, device in self.aggregator.devices.items():

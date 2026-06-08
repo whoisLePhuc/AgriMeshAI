@@ -86,6 +86,7 @@ def daemon(host, port):
 
         # Start background recording
         bg_recorder = BackgroundRecorder(aggregator, recorder)
+        await bg_recorder.register_devices()  # Register devices TOML → SQLite
         bg_recorder.start()
 
         n_tools = len(get_fleet_tools()) + len(aggregator.get_tools())

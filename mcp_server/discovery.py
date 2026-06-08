@@ -8,10 +8,12 @@ from mcp_server.devices.model import DeviceModel
 from mcp_server.adapters.base import BaseAdapter
 from mcp_server.adapters.mock import MockAdapter
 from mcp_server.adapters.serial import SerialAdapter
+from mcp_server.adapters.mqtt import MQTTAdapter
 
 _ADAPTER_REGISTRY = {
     "mock": MockAdapter,
     "serial": SerialAdapter,
+    "mqtt": MQTTAdapter,
 }
 
 
@@ -37,6 +39,13 @@ def discover_devices(profiles_dir: str) -> list[DiscoveredDevice]:
         conn = m.connection
         if conn.protocol == "serial":
             adapter = adapter_cls(port=conn.port, baud_rate=conn.baud_rate, timeout_ms=conn.timeout_ms)
+        elif conn.protocol == "mqtt":
+            adapter = adapter_cls(
+                broker=conn.broker,
+                port=conn.mqtt_port,
+                topic_prefix=conn.topic_prefix,
+                timeout_ms=conn.timeout_ms,
+            )
         else:
             adapter = adapter_cls()
         devices.append(DiscoveredDevice(model=m, adapter=adapter))
