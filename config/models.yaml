@@ -4,8 +4,8 @@
 
 llm:
   provider: ollama
-  model: qwen2.5:1.5b
-  api_url: http://localhost:11434/v1
+  model: qwen2.5:7b
+  api_url: http://100.125.217.6:11434/v1
   # api_url: http://localhost:11434/v1  # Ollama mặc định
   max_tokens: 4096
   temperature: 0.2
