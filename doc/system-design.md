@@ -30,14 +30,18 @@ Hệ thống kết nối người nông dân với thiết bị cảm biến và
 
 ### 1.2. Nguyên tắc thiết kế
 
-- **Offline-first:** Toàn bộ chức năng hoạt động khi không có Internet.
-- **Edge-centric:** Mọi quyết định được đưa ra tại gateway, không phụ thuộc cloud.
+- **LLM Server ≠ Edge Gateway:** LLM chạy trên server riêng (PC/cloud), edge gateway chỉ chạy agent nhẹ + MCP + recorder.
+- **Dual-mode:** Online = LLM available → chat + tool calling. Offline = LLM unreachable → data collection 24/7.
+- **Offline-first:** Thu thập dữ liệu, ghi SQLite, threshold alerts vẫn hoạt động khi mất kết nối LLM Server.
+- **Edge-centric:** Mọi quyết định vận hành được đưa ra tại gateway, không phụ thuộc cloud.
 - **MCP là lớp giao tiếp duy nhất** giữa AI và phần cứng.
 - **Safety tách biệt khỏi AI:** Guard rail không dùng LLM để quyết định an toàn.
-- **AI on-demand:** LLM chỉ khởi động khi cần, không chạy nền liên tục.
 - **Human-in-the-loop:** Lệnh điều khiển actuator luôn cần xác nhận người dùng.
 
 ### 1.3. Kiến trúc hiện tại (2026)
+
+> **Online mode:** LLM Server reachable → Agent chat + tool calling
+> **Offline mode:** LLM Server unreachable → Edge gateway = data collector + recorder
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -556,7 +560,19 @@ Agent có quyền truy cập 5 MCP tools:
 | `fleet.get_alerts(hours, severity)` | Cảnh báo |
 | `call_device(device, tool)` | Tool generic cho thiết bị |
 
-### 6.5. Lưu ý
+### 6.5. Offline Behavior
+
+Khi LLM Server không reachable (Jetson mất kết nối Tailscale/Internet), agent sẽ báo lỗi kết nối. Edge gateway vẫn hoạt động ở **offline mode**:
+
+| Thành phần | Online | Offline |
+|-----------|--------|---------|
+| AI Agent | ✅ Chat + tool calling | ❌ Báo "LLM offline" |
+| MCP Server | ✅ Tool routing | ✅ Vẫn chạy |
+| Recorder (SQLite) | ✅ Ghi dữ liệu | ✅ Ghi dữ liệu |
+| Background polling | ✅ Poll sensors | ✅ Poll sensors |
+| Rule Engine (sau này) | ✅ Threshold alerts | ✅ Threshold alerts |
+
+### 6.6. Lưu ý
 
 - **Query bằng English** — Qwen2.5 chỉ tool calling ổn định với English
 - **Trả lời bằng tiếng Việt** — instructions.txt set `Reply in Vietnamese ONLY`

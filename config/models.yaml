@@ -1,12 +1,14 @@
 # AgriMeshAI — Model Configuration
-# Ollama quản lý file model (~/.ollama/models/blobs/)
-# File này chỉ tham chiếu tên model
+# LLM Server configuration. Edge gateway connects to LLM Server via Tailscale/WAN
+# for AI chat and tool calling. When LLM Server is unreachable, the gateway operates
+# in offline mode: data collection, recording, and threshold-based alerts only.
 
 llm:
   provider: ollama
   model: qwen2.5:7b
+  # LLM Server endpoint (PC, cloud, or local)
   api_url: http://100.125.217.6:11434/v1
-  # api_url: http://localhost:11434/v1  # Ollama mặc định
+  # api_url: http://localhost:11434/v1  # Ollama local
   max_tokens: 4096
   temperature: 0.2
-  keep_alive: 5m  # giữ model trong RAM 5 phút sau khi dùng
+  keep_alive: 5m

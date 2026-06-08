@@ -21,7 +21,53 @@
 
 ## 1. Tổng Quan Kiến Trúc
 
-### 1.1. Sơ Đồ Tổng Thể
+### 1.1. Mô Hình Tổng Thể
+
+Hệ thống được thiết kế theo mô hình **LLM Server + Edge Gateway**:
+
+- **LLM Server** — Máy chủ tập trung chạy LLM (PC, server, hoặc cloud). Có thể phục vụ nhiều edge gateways.
+- **Edge Gateway** — Thiết bị tại hiện trường (Jetson Nano), chạy agent + MCP server + recorder.
+
+```
+                          ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+                          │         LLM Server                 │
+                          │  (PC RTX 3050 / Cloud VM)          │
+                          │  Ollama + Qwen2.5 7B               │
+                          │  Port 11434                        │
+                          └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+                                    ▲              ▲
+                                    │ Tailscale    │ Tailscale
+                                    │              │
+                          ┌─────────┴──────────────┴─────────┐
+                          │        Edge Gateway               │
+                          │  (Jetson Nano 4GB)                │
+                          │                                   │
+                          │  ┌─────────────────────────┐      │
+                          │  │  AI Agent (edge-agent)   │      │
+                          │  │  ├── Online: chat + tool │      │
+                          │  │  └── Offline: fallback   │      │
+                          │  │                          │      │
+                          │  │  MCP Server (agrimesh)   │      │
+                          │  │  Recorder (SQLite)       │      │
+                          │  │  Hardware I/O (LoRa...)  │      │
+                          │  └─────────────────────────┘      │
+                          └──────────────────────────────────┘
+```
+
+### 1.2. Dual-Mode Operation
+
+| Mode | Điều kiện | Agent | MCP Server | Recorder |
+|------|-----------|-------|-------------|----------|
+| **Online** | LLM Server reachable | ✅ Chat + tool calling | ✅ Tool routing | ✅ Ghi dữ liệu 24/7 |
+| **Offline** | LLM Server unreachable | ❌ Thông báo "offline" | ✅ Vẫn routing | ✅ Ghi dữ liệu 24/7 |
+
+Trong **offline mode**, edge gateway vẫn hoạt động đầy đủ như một **gateway thu thập và xử lý dữ liệu**:
+- Poll sensors qua LoRa/Serial/MQTT
+- Ghi dữ liệu vào SQLite
+- Kiểm tra threshold rules (khi có Rule Engine)
+- Lưu trữ dữ liệu chờ đồng bộ khi online
+
+### 1.3. Sơ Đồ Kết Nối Hiện Tại
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -92,7 +138,7 @@ AI Agent (edge-agent)
     └──► [Text reply] → In ra terminal
 ```
 
-### 1.3. Nguyên Tắc Thiết Kế
+### 1.4. Nguyên Tắc Thiết Kế
 
 - **Offline-first:** Agent + MCP Server + Recorder chạy local trên Jetson
 - **LLM tách rời:** LLM chạy trên PC, kết nối qua Tailscale (có thể thay bằng cloud API)
