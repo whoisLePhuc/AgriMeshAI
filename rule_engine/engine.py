@@ -249,9 +249,9 @@ class RuleEngine:
 
         for reading in latest:
             if reading.timestamp < cutoff:
-                rule_id = "R06"
+                rule_id = "R09"
                 msg = f"{reading.device_id}: no data for {hours:.0f}h"
-                logger.info("alert R06 [WARNING] %s", msg)
+                logger.info("alert R09 [WARNING] %s", msg)
                 await self._bus.emit(
                     "alert_triggered",
                     rule_id=rule_id,

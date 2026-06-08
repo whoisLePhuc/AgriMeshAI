@@ -41,6 +41,25 @@ rules:
     severity: WARNING
     message: "Độ ẩm {device_id}: {value}% vượt ngưỡng 80% — ngập úng"
 
+  # ── Threshold: độ ẩm không khí ──────────────────────────────────────────
+  - id: R06
+    name: humidity_high
+    type: threshold
+    sensor_type: humidity
+    operator: ">"
+    value: 90
+    severity: WARNING
+    message: "Độ ẩm không khí {device_id}: {value}% — nguy cơ nấm mốc"
+
+  - id: R07
+    name: humidity_low
+    type: threshold
+    sensor_type: humidity
+    operator: "<"
+    value: 30
+    severity: WARNING
+    message: "Độ ẩm không khí {device_id}: {value}% — quá khô, cây dễ stress"
+
   # ── Threshold: pin ─────────────────────────────────────────────────────
   - id: R05
     name: battery_low
