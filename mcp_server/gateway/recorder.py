@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from mcp_server.gateway.aggregator import Aggregator, ToolRoute
     from recorder.store import ReadingStore
 
+from mcp_server.event_bus import EventBus
+
 logger = logging.getLogger(__name__)
 
 # Types that can be stored as float in the time-series store
@@ -53,6 +55,7 @@ async def _poll_device(
     store: ReadingStore,
     interval_s: float,
     stop_event: asyncio.Event,
+    bus: EventBus | None = None,
 ) -> None:
     """Poll a single device's recordable tools at a fixed interval."""
     logger.info(
@@ -82,6 +85,14 @@ async def _poll_device(
                     value=value,
                     unit=unit or "",
                 )
+                if bus:
+                    await bus.emit(
+                        "reading_recorded",
+                        device_id=device_name,
+                        sensor_id=route.tool_name,
+                        value=value,
+                        unit=unit or "",
+                    )
             except Exception:
                 logger.warning("recorder: failed to poll %s", namespaced, exc_info=True)
 
@@ -97,6 +108,7 @@ async def run_recorder(
     aggregator: Aggregator,
     store: ReadingStore,
     stop_event: asyncio.Event,
+    bus: EventBus | None = None,
 ) -> None:
     """Start per-device polling loops for all recordable devices.
 
