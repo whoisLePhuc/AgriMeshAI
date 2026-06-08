@@ -124,28 +124,30 @@ class RuleEngine:
             if not rule.applies_to(sensor_id):
                 continue
 
-            triggered = await self._evaluate(rule, device_id or "", sensor_id, value)
+            extra = {}
+            triggered, extra = await self._evaluate(rule, device_id or "", sensor_id, value)
+            if triggered:
+                await self._fire(rule, device_id or "", sensor_id, value, extra)
 
     async def _evaluate(
         self, rule: Rule, device_id: str, sensor_id: str, value: float
-    ) -> bool:
-        """Evaluate a single rule. Returns True if triggered."""
+    ) -> tuple[bool, dict]:
+        """Evaluate a single rule. Returns (triggered, extra_context)."""
         try:
             if rule.type == "threshold":
                 triggered = self._check_threshold(rule, value)
+                return triggered, {}
             elif rule.type == "rate":
-                triggered = await self._check_rate(rule, device_id, sensor_id, value)
+                triggered, rate = await self._check_rate(rule, device_id, sensor_id, value)
+                return triggered, {"rate": rate}
             elif rule.type == "stuck":
                 triggered = await self._check_stuck(rule, device_id, sensor_id)
+                return triggered, {}
             else:
-                return False
-
-            if triggered:
-                await self._fire(rule, device_id, sensor_id, value)
-            return triggered
+                return False, {}
         except Exception:
             logger.exception("rule %s failed", rule.id)
-            return False
+            return False, {}
 
     # ── rule checks ───────────────────────────────────────────────────────
 
@@ -166,8 +168,10 @@ class RuleEngine:
 
     async def _check_rate(
         self, rule: Rule, device_id: str, sensor_id: str, value: float
-    ) -> bool:
-        """Check rate of change over the lookback window."""
+    ) -> tuple[bool, float]:
+        """Check rate of change over the lookback window.
+        Returns (triggered, rate_per_hour).
+        """
         hours = max(rule.window_minutes / 60, 0.1)
         history = await self._store.get_history(
             device_id=device_id,
@@ -176,17 +180,17 @@ class RuleEngine:
             limit=50,
         )
         if len(history) < 2:
-            return False
+            return False, 0.0
 
         oldest = history[-1]  # oldest is last in DESC order
         newest = history[0]
         dt = newest.timestamp - oldest.timestamp
         if dt <= 0:
-            return False
+            return False, 0.0
 
         rate_per_hour = (newest.value - oldest.value) / (dt / 3600)
         max_delta = rule.value or 0
-        return abs(rate_per_hour) > max_delta
+        return abs(rate_per_hour) > max_delta, round(rate_per_hour, 1)
 
     async def _check_stuck(
         self, rule: Rule, device_id: str, sensor_id: str
@@ -206,7 +210,8 @@ class RuleEngine:
 
     # ── alert emission ────────────────────────────────────────────────────
 
-    async def _fire(self, rule: Rule, device_id: str, sensor_id: str, value: float) -> None:
+    async def _fire(self, rule: Rule, device_id: str, sensor_id: str, value: float,
+                    extra: dict | None = None) -> None:
         """Emit alert if not in cooldown."""
         cooldown_key = f"{rule.id}:{device_id}:{sensor_id}"
         now = time.time()
@@ -216,7 +221,7 @@ class RuleEngine:
             return
 
         self._cooldowns[cooldown_key] = now
-        message = rule.format_message(device_id, sensor_id, value)
+        message = rule.format_message(device_id, sensor_id, value, rate=(extra or {}).get("rate"))
 
         logger.info(
             "alert %s [%s] %s = %s: %s",
