@@ -29,6 +29,7 @@ from mcp.types import (
 
 from mcp_server.event_bus import EventBus
 from mcp_server.gateway.aggregator import Aggregator
+from rule_engine import RuleEngine
 from device_manager.src.discovery import DiscoveryResult, discover_devices
 from mcp_server.gateway.fleet import FleetTools
 from mcp_server.gateway.recorder import run_recorder
@@ -65,6 +66,7 @@ class AgriMeshAIServer:
         self._server = Server(name="agrimesh", version="0.1.0")
         self._daemon_active = False
         self._bus = EventBus()
+        self._rule_engine = None
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -216,6 +218,14 @@ class AgriMeshAIServer:
 
         # Wire up fleet tools
         self._fleet = FleetTools(self._aggregator, self._store)
+
+        # Wire up rule engine (auto-subscribes to EventBus)
+        self._rule_engine = RuleEngine(
+            self._bus,
+            self._store,
+            rules_path=str(Path(__file__).parent.parent.parent / "config" / "rules.yaml"),
+        )
+        logger.info("rule engine: %d rule(s) loaded", len(self._rule_engine.rules))
 
         return discovery
 
@@ -378,9 +388,19 @@ class AgriMeshAIServer:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _request_shutdown)
 
+        async def _missing_data_loop() -> None:
+            while not stop_event.is_set():
+                if self._rule_engine:
+                    await self._rule_engine.check_missing(hours=1.0)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=300)
+                except TimeoutError:
+                    pass
+
         tasks = [
             run_recorder(self._aggregator, self._store, stop_event, bus=self._bus),
             self._run_retention_loop(stop_event),
+            _missing_data_loop(),
             http_server.serve(),
         ]
         try:
@@ -425,3 +445,8 @@ class AgriMeshAIServer:
     def bus(self) -> EventBus:
         """Application-level event bus for inter-module communication."""
         return self._bus
+
+    @property
+    def rule_engine(self):
+        """Rule engine instance (initialized after start())."""
+        return self._rule_engine
