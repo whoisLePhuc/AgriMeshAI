@@ -3,7 +3,7 @@ AgriMeshAI MCP CLI — agrimesh command.
 
 Usage:
     agrimesh start              # stdio mode (connect with AI Agent)
-    agrimesh daemon             # HTTP daemon with background recording
+    agrimesh daemon             # HTTP daemon mode
     agrimesh status             # show system status
 """
 
@@ -15,9 +15,7 @@ import click
 import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROFILES_DIR = os.path.join(ROOT, "devices")
 DATA_DIR = os.path.join(ROOT, "data")
-os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -32,13 +30,6 @@ def load_config():
         return yaml.safe_load(f)
 
 
-def create_recorder():
-    from recorder import Recorder, ReadingsStore
-    db_path = os.path.join(DATA_DIR, "agrimesh.db")
-    store = ReadingsStore(db_path)
-    return Recorder(store)
-
-
 @click.group()
 def main():
     """AgriMeshAI MCP Server — IoT tool orchestration for smart agriculture"""
@@ -48,60 +39,25 @@ def main():
 @main.command()
 def start():
     """Start MCP server in stdio mode (for AI Agent / Claude Desktop)"""
-    from mcp_server.server import serve_stdio
+    from mcp_server.server import server
 
-    async def run():
-        recorder = create_recorder()
-        await recorder.start()
-        config = load_config()
-        print(f"✓ AgriMesh MCP Server ready (model: {config['llm']['model']})", file=sys.stderr)
-        try:
-            await serve_stdio(recorder, PROFILES_DIR)
-        finally:
-            await recorder.stop()
-
-    asyncio.run(run())
+    config = load_config()
+    print(f"✓ AgriMesh MCP Server ready (model: {config['llm']['model']})", file=sys.stderr)
+    server.run(transport="stdio")
 
 
 @main.command()
 @click.option("--host", default="0.0.0.0", help="Bind address")
 @click.option("--port", default=8374, help="HTTP port")
 def daemon(host, port):
-    """Start MCP server in HTTP daemon mode with background recording"""
-    from mcp_server.server import serve_http
-    from mcp_server.aggregator import Aggregator
-    from mcp_server.discovery import discover_devices
-    from mcp_server.background_recorder import BackgroundRecorder
-    from mcp_server.tools.fleet import get_fleet_tools
+    """Start MCP server in HTTP daemon mode"""
+    from mcp_server.server import server
 
-    async def run():
-        recorder = create_recorder()
-        await recorder.start()
-        config = load_config()
-
-        # Discover devices + create aggregator
-        discovered = discover_devices(PROFILES_DIR)
-        aggregator = Aggregator()
-        aggregator.register_all(discovered)
-
-        # Start background recording
-        bg_recorder = BackgroundRecorder(aggregator, recorder)
-        await bg_recorder.register_devices()  # Register devices TOML → SQLite
-        bg_recorder.start()
-
-        n_tools = len(get_fleet_tools()) + len(aggregator.get_tools())
-        print(f"✓ AgriMesh MCP Daemon starting on {host}:{port}", file=sys.stderr)
-        print(f"  Model: {config['llm']['model']}", file=sys.stderr)
-        print(f"  Tools: {n_tools} ({len(aggregator.devices)} device(s))", file=sys.stderr)
-        print(f"  SSE: http://{host}:{port}/sse", file=sys.stderr)
-
-        try:
-            await serve_http(recorder, host, port, PROFILES_DIR)
-        finally:
-            await bg_recorder.stop()
-            await recorder.stop()
-
-    asyncio.run(run())
+    config = load_config()
+    print(f"✓ AgriMesh MCP Daemon starting on {host}:{port}", file=sys.stderr)
+    print(f"  Model: {config['llm']['model']}", file=sys.stderr)
+    print(f"  SSE: http://{host}:{port}/sse", file=sys.stderr)
+    server.run(transport="sse", host=host, port=port)
 
 
 @main.command()
