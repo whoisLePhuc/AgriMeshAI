@@ -1,38 +1,50 @@
-"""
-Base adapter interface for hardware communication (LoRa, serial, MQTT).
-"""
+"""Base adapter interface and result type."""
 
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any
+
+from device_manager.src.model import ConnectionConfig
 
 
 @dataclass
 class AdapterResult:
-    """Result from an adapter operation."""
+    """Wraps adapter operation outcomes. Adapters never raise — they return these."""
+
     success: bool
-    data: str = ""
-    error: str = ""
+    data: Any = None
+    error: str | None = None
+
+    @classmethod
+    def ok(cls, data: Any = None) -> AdapterResult:
+        return cls(success=True, data=data)
+
+    @classmethod
+    def fail(cls, error: str) -> AdapterResult:
+        return cls(success=False, error=error)
 
 
-class BaseAdapter:
-    """Abstract base class for all device protocol adapters."""
+class BaseAdapter(ABC):
+    """Abstract base for all protocol adapters."""
 
-    async def connect(self) -> AdapterResult:
-        """Establish connection to the device."""
-        raise NotImplementedError
+    def __init__(self, config: ConnectionConfig) -> None:
+        self.config = config
 
-    async def disconnect(self) -> AdapterResult:
-        """Close connection to the device."""
-        raise NotImplementedError
+    @abstractmethod
+    async def connect(self) -> AdapterResult: ...
 
-    async def send(self, data: str | bytes) -> AdapterResult:
-        """Send data/command to the device."""
-        raise NotImplementedError
+    @abstractmethod
+    async def disconnect(self) -> AdapterResult: ...
 
-    async def receive(self, length: Optional[int] = None, timeout: Optional[float] = None) -> AdapterResult:
-        """Receive data/response from the device."""
-        raise NotImplementedError
+    @abstractmethod
+    async def send(self, data: bytes | str) -> AdapterResult: ...
 
-    async def health_check(self) -> AdapterResult:
-        """Check if the device is responsive."""
-        raise NotImplementedError
+    @abstractmethod
+    async def receive(
+        self, length: int | None = None, timeout: float | None = None
+    ) -> AdapterResult: ...
+
+    @abstractmethod
+    async def health_check(self) -> AdapterResult: ...

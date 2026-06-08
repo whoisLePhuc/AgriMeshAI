@@ -1,65 +1,162 @@
-"""
-Serial adapter — UART communication via pyserial-asyncio.
-"""
+"""Serial adapter — communicates with devices over UART/USB serial."""
+
+from __future__ import annotations
 
 import asyncio
-from .base import BaseAdapter, AdapterResult
+import logging
+
+import serial_asyncio
+
+from mcp_server.adapters.base import AdapterResult, BaseAdapter
+from device_manager.src.model import ConnectionConfig
+
+logger = logging.getLogger(__name__)
 
 
 class SerialAdapter(BaseAdapter):
-    """Async UART serial adapter for LoRa module communication."""
+    """Async serial adapter using pyserial-asyncio.
 
-    def __init__(self, port: str = "/dev/ttyUSB0", baud_rate: int = 115200,
-                 timeout_ms: int = 3000):
-        self.port = port
-        self.baud_rate = baud_rate
-        self.timeout_ms = timeout_ms
-        self._serial = None
-        self._lock = asyncio.Lock()
+    Sends text commands terminated with newline and reads line-delimited
+    responses. This matches the common pattern for microcontrollers
+    (Arduino, ESP32, Pico) running a simple text command protocol.
+
+    For binary reads, pass length to receive() — raw bytes are returned
+    without text decoding.
+    """
+
+    def __init__(self, config: ConnectionConfig) -> None:
+        super().__init__(config)
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+
+    @property
+    def connected(self) -> bool:
+        return self._writer is not None
+
+    def _mark_disconnected(self) -> None:
+        """Transition to disconnected state (e.g. after I/O error)."""
+        writer = self._writer
+        self._reader = None
+        self._writer = None
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
 
     async def connect(self) -> AdapterResult:
+        if self.connected:
+            return AdapterResult.fail("already connected")
+
+        port = self.config.port
+        if not port:
+            return AdapterResult.fail("no serial port configured")
+
+        baudrate = self.config.baud_rate or 9600
+        timeout = self.config.timeout_ms / 1000
+
         try:
-            import serial_asyncio
-            self._serial = await serial_asyncio.open_serial_connection(
-                url=self.port, baudrate=self.baud_rate,
+            self._reader, self._writer = await asyncio.wait_for(
+                serial_asyncio.open_serial_connection(
+                    url=port,
+                    baudrate=baudrate,
+                ),
+                timeout=timeout,
             )
-            return AdapterResult(success=True, data=f"Connected to {self.port} @ {self.baud_rate}")
-        except ImportError:
-            return AdapterResult(success=False, error="serial_asyncio not installed")
+        except TimeoutError:
+            return AdapterResult.fail(f"connection timed out: {port}")
         except Exception as e:
-            return AdapterResult(success=False, error=str(e))
+            return AdapterResult.fail(f"connection failed: {e}")
+
+        logger.info("connected to %s at %d baud", port, baudrate)
+        return AdapterResult.ok()
 
     async def disconnect(self) -> AdapterResult:
-        if self._serial:
-            self._serial.close()
-            self._serial = None
-        return AdapterResult(success=True, data="Disconnected")
+        if not self.connected:
+            return AdapterResult.ok()
 
-    async def send(self, data: str | bytes) -> AdapterResult:
-        if not self._serial:
-            return AdapterResult(success=False, error="Not connected")
-        async with self._lock:
-            try:
-                payload = data.encode() if isinstance(data, str) else data
-                self._serial.write(payload + b"\n")
-                await self._serial.drain()
-                return AdapterResult(success=True, data=f"Sent: {len(payload)} bytes")
-            except Exception as e:
-                return AdapterResult(success=False, error=str(e))
+        writer = self._writer
+        self._reader = None
+        self._writer = None
 
-    async def receive(self, length: int | None = None, timeout: float | None = None) -> AdapterResult:
-        if not self._serial:
-            return AdapterResult(success=False, error="Not connected")
-        async with self._lock:
-            try:
-                t = timeout if timeout else self.timeout_ms / 1000
-                data = await asyncio.wait_for(self._serial.readline(), timeout=t)
-                return AdapterResult(success=True, data=data.decode().strip())
-            except asyncio.TimeoutError:
-                return AdapterResult(success=False, error="Timeout")
-            except Exception as e:
-                return AdapterResult(success=False, error=str(e))
+        try:
+            if writer:
+                writer.close()
+                if hasattr(writer, "wait_closed"):
+                    await writer.wait_closed()
+        except Exception as e:
+            logger.warning("error during disconnect: %s", e)
+
+        return AdapterResult.ok()
+
+    async def send(self, data: bytes | str) -> AdapterResult:
+        if not self.connected or self._writer is None:
+            return AdapterResult.fail("not connected")
+
+        try:
+            if isinstance(data, str):
+                payload = (data.rstrip("\n") + "\n").encode("utf-8")
+            else:
+                payload = data
+
+            self._writer.write(payload)
+            await self._writer.drain()
+        except Exception as e:
+            self._mark_disconnected()
+            return AdapterResult.fail(f"send failed: {e}")
+
+        return AdapterResult.ok()
+
+    async def receive(
+        self, length: int | None = None, timeout: float | None = None
+    ) -> AdapterResult:
+        if not self.connected or self._reader is None:
+            return AdapterResult.fail("not connected")
+
+        if timeout is None:
+            timeout = self.config.timeout_ms / 1000
+
+        try:
+            if length is not None:
+                raw = await asyncio.wait_for(
+                    self._reader.readexactly(length),
+                    timeout=timeout,
+                )
+                # Binary read — return raw bytes, no text decoding
+                return AdapterResult.ok(raw)
+            else:
+                raw = await asyncio.wait_for(
+                    self._reader.readline(),
+                    timeout=timeout,
+                )
+        except TimeoutError:
+            # Timeout is non-fatal — the device may just be slow.
+            # Don't disconnect; let the caller retry or escalate.
+            return AdapterResult.fail("receive timed out")
+        except asyncio.IncompleteReadError as e:
+            self._mark_disconnected()
+            return AdapterResult.fail(f"incomplete read: got {len(e.partial)} bytes")
+        except Exception as e:
+            self._mark_disconnected()
+            return AdapterResult.fail(f"receive failed: {e}")
+
+        # Text read — decode and strip line endings
+        text = raw.decode("utf-8", errors="replace").strip()
+        if not text:
+            return AdapterResult.fail("empty response")
+
+        return AdapterResult.ok(text)
 
     async def health_check(self) -> AdapterResult:
-        """Ping the device to check if it's responsive."""
-        return await self.send("PING")
+        if not self.connected:
+            return AdapterResult.fail("not connected")
+
+        send_result = await self.send("PING")
+        if not send_result.success:
+            return send_result
+
+        recv_result = await self.receive()
+        if not recv_result.success:
+            return recv_result
+
+        return AdapterResult.ok({"status": "healthy", "response": recv_result.data})

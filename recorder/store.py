@@ -1,209 +1,307 @@
-"""
-SQLite storage for sensor readings, alerts, devices, and actuation logs.
-WAL mode enabled for concurrent read/write.
-"""
+"""SQLite time-series store for sensor readings."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
 
 import os
-import time
-import json
 import aiosqlite
+from pydantic import BaseModel
 
 
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "agrimesh.db")
+class Reading(BaseModel):
+    """A single sensor reading."""
 
-SCHEMA_SQL = """
+    timestamp: float
+    device_id: str
+    sensor_id: str
+    value: float
+    unit: str
+
+
+class AnomalyResult(BaseModel):
+    """A sensor reading flagged as anomalous relative to its rolling baseline."""
+
+    device_id: str
+    sensor_id: str
+    current_value: float
+    mean: float
+    stddev: float
+    sigma_distance: float
+    unit: str
+
+
+_SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id     INTEGER NOT NULL,
+    timestamp   REAL    NOT NULL,
+    device_id   TEXT    NOT NULL,
     sensor_id   TEXT    NOT NULL,
     value       REAL    NOT NULL,
     unit        TEXT    NOT NULL,
-    timestamp   INTEGER NOT NULL,
-    quality     INTEGER DEFAULT 100
-);
-CREATE INDEX IF NOT EXISTS idx_readings_lookup
-    ON readings (node_id, sensor_id, timestamp DESC);
-
-CREATE TABLE IF NOT EXISTS alerts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id     INTEGER NOT NULL,
-    sensor_id   TEXT,
-    rule_id     TEXT    NOT NULL,
-    value       REAL,
-    severity    TEXT    NOT NULL,
-    message     TEXT    NOT NULL,
-    timestamp   INTEGER NOT NULL,
-    ack_at      INTEGER,
-    ack_by      TEXT
+    downsampled INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS devices (
-    node_id      INTEGER PRIMARY KEY,
-    type         TEXT    NOT NULL,
-    name         TEXT    NOT NULL,
-    location     TEXT,
-    sensors      TEXT,
-    config       TEXT,
-    status       TEXT DEFAULT 'unknown',
-    last_seen    INTEGER,
-    battery_pct  INTEGER
-);
+CREATE INDEX IF NOT EXISTS idx_readings_device_sensor_time
+    ON readings (device_id, sensor_id, timestamp);
 
-CREATE TABLE IF NOT EXISTS actuation_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id      INTEGER NOT NULL,
-    actuator_id  TEXT    NOT NULL,
-    command      TEXT    NOT NULL,
-    params       TEXT,
-    duration_sec INTEGER,
-    triggered_by TEXT    NOT NULL,
-    confirmed_by TEXT,
-    status       TEXT    NOT NULL,
-    timestamp    INTEGER NOT NULL
-);
+CREATE INDEX IF NOT EXISTS idx_readings_downsampled
+    ON readings (downsampled, timestamp);
 """
 
 
-class ReadingsStore:
-    """Async SQLite store for all sensor and system data."""
+class ReadingStore:
+    """Async SQLite store for sensor readings."""
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self.db = None
+    def __init__(self, db_path: str | Path = "data/agrimesh.db") -> None:
+        self._db_path = str(db_path)
+        self._db: aiosqlite.Connection | None = None
 
-    async def open(self):
-        self.db = await aiosqlite.connect(self.db_path)
-        self.db.row_factory = aiosqlite.Row
-        await self.db.execute("PRAGMA journal_mode=WAL")
-        await self.db.executescript(SCHEMA_SQL)
+    async def init(self) -> None:
+        """Open the database and create tables if needed."""
+        # Ensure parent directory exists
+        db_dir = os.path.dirname(self._db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        self._db = await aiosqlite.connect(self._db_path, isolation_level=None)
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.executescript(_SCHEMA)
+        await self._db.commit()
 
-    async def close(self):
-        if self.db:
-            await self.db.close()
+    async def __aenter__(self) -> ReadingStore:
+        await self.init()
+        return self
 
-    # ── Readings ──────────────────────────────────────────────
+    async def __aexit__(self, *exc: object) -> None:
+        await self.close()
 
-    async def insert_reading(self, node_id: int, sensor_id: str, value: float,
-                              unit: str, timestamp: int, quality: int = 100):
-        await self.db.execute(
-            "INSERT INTO readings (node_id, sensor_id, value, unit, timestamp, quality) VALUES (?, ?, ?, ?, ?, ?)",
-            (node_id, sensor_id, value, unit, timestamp, quality),
+    async def close(self) -> None:
+        """Close the database connection."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
+
+    def _conn(self) -> aiosqlite.Connection:
+        if self._db is None:
+            raise RuntimeError("store not initialized — call init() first")
+        return self._db
+
+    async def open_retention_conn(self) -> tuple[aiosqlite.Connection, bool]:
+        """Open a connection for retention cleanup.
+
+        Returns (connection, should_close). For file-backed databases,
+        opens a separate connection so retention transactions don't
+        interfere with the main connection's record() commits. For
+        in-memory databases (tests), returns the main connection.
+        """
+        if self._db_path == ":memory:":
+            return self._conn(), False
+        conn = await aiosqlite.connect(self._db_path, isolation_level=None)
+        await conn.execute("PRAGMA journal_mode=WAL")
+        return conn, True
+
+    async def record(
+        self,
+        device_id: str,
+        sensor_id: str,
+        value: float,
+        unit: str,
+        timestamp: float | None = None,
+    ) -> Reading:
+        """Record a sensor reading. Returns the stored reading."""
+        ts = timestamp if timestamp is not None else time.time()
+        db = self._conn()
+        await db.execute(
+            "INSERT INTO readings (timestamp, device_id, sensor_id, value, unit) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, device_id, sensor_id, value, unit),
         )
-        await self.db.commit()
-
-    async def get_readings(self, node_id: int, sensor_id: str,
-                            hours: int = 24, limit: int = 1000):
-        cutoff = int(time.time()) - hours * 3600
-        cursor = await self.db.execute(
-            "SELECT * FROM readings WHERE node_id=? AND sensor_id=? AND timestamp>=?"
-            " ORDER BY timestamp DESC LIMIT ?",
-            (node_id, sensor_id, cutoff, limit),
+        await db.commit()
+        return Reading(
+            timestamp=ts, device_id=device_id, sensor_id=sensor_id, value=value, unit=unit
         )
-        return await cursor.fetchall()
 
-    async def get_latest_reading(self, node_id: int, sensor_id: str):
-        cursor = await self.db.execute(
-            "SELECT * FROM readings WHERE node_id=? AND sensor_id=? ORDER BY timestamp DESC LIMIT 1",
-            (node_id, sensor_id),
+    async def record_batch(
+        self,
+        readings: list[tuple[str, str, float, str, float | None]],
+    ) -> int:
+        """Record multiple readings at once.
+
+        Each tuple: (device_id, sensor_id, value, unit, timestamp|None).
+        Returns the number of readings inserted.
+        """
+        db = self._conn()
+        now = time.time()
+        rows = [
+            (ts if ts is not None else now, did, sid, val, unit)
+            for did, sid, val, unit, ts in readings
+        ]
+        await db.executemany(
+            "INSERT INTO readings (timestamp, device_id, sensor_id, value, unit) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
         )
-        return await cursor.fetchone()
+        await db.commit()
+        return len(rows)
 
-    async def get_all_latest_readings(self):
-        """Get the latest reading for every (node_id, sensor_id) pair."""
-        cursor = await self.db.execute(
-            "SELECT r.* FROM readings r "
-            "INNER JOIN (SELECT node_id, sensor_id, MAX(timestamp) as maxts FROM readings GROUP BY node_id, sensor_id) l "
-            "ON r.node_id = l.node_id AND r.sensor_id = l.sensor_id AND r.timestamp = l.maxts"
+    async def get_history(
+        self,
+        device_id: str,
+        sensor_id: str,
+        start: float | None = None,
+        end: float | None = None,
+        limit: int = 1000,
+    ) -> list[Reading]:
+        """Query time-series readings for a specific sensor."""
+        db = self._conn()
+        clauses = ["device_id = ?", "sensor_id = ?"]
+        params: list[object] = [device_id, sensor_id]
+
+        if start is not None:
+            clauses.append("timestamp >= ?")
+            params.append(start)
+        if end is not None:
+            clauses.append("timestamp <= ?")
+            params.append(end)
+
+        where = " AND ".join(clauses)
+        params.append(limit)
+
+        cursor = await db.execute(
+            f"SELECT timestamp, device_id, sensor_id, value, unit "
+            f"FROM readings WHERE {where} "
+            f"ORDER BY timestamp DESC LIMIT ?",
+            params,
         )
-        return await cursor.fetchall()
+        rows = await cursor.fetchall()
+        return [
+            Reading(timestamp=r[0], device_id=r[1], sensor_id=r[2], value=r[3], unit=r[4])
+            for r in rows
+        ]
 
-    # ── Alerts ────────────────────────────────────────────────
-
-    async def insert_alert(self, node_id: int, rule_id: str, severity: str,
-                            message: str, timestamp: int,
-                            sensor_id: str = None, value: float = None):
-        await self.db.execute(
-            "INSERT INTO alerts (node_id, sensor_id, rule_id, value, severity, message, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (node_id, sensor_id, rule_id, value, severity, message, timestamp),
+    async def get_latest(
+        self,
+        device_id: str,
+        sensor_id: str,
+    ) -> Reading | None:
+        """Get the most recent reading for a specific sensor."""
+        db = self._conn()
+        cursor = await db.execute(
+            "SELECT timestamp, device_id, sensor_id, value, unit "
+            "FROM readings "
+            "WHERE device_id = ? AND sensor_id = ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (device_id, sensor_id),
         )
-        await self.db.commit()
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return Reading(
+            timestamp=row[0], device_id=row[1], sensor_id=row[2],
+            value=row[3], unit=row[4],
+        )
 
-    async def get_alerts(self, hours: int = 24, severity: str = None, limit: int = 100):
-        cutoff = int(time.time()) - hours * 3600
-        if severity:
-            cursor = await self.db.execute(
-                "SELECT * FROM alerts WHERE timestamp>=? AND severity=? ORDER BY timestamp DESC LIMIT ?",
-                (cutoff, severity, limit),
+    async def get_all_latest(self) -> list[Reading]:
+        """Get the most recent reading for every device/sensor pair.
+
+        Backs fleet.get_all_readings — one call gives the LLM the full system state.
+        """
+        db = self._conn()
+        cursor = await db.execute(
+            "SELECT timestamp, device_id, sensor_id, value, unit "
+            "FROM ("
+            "  SELECT timestamp, device_id, sensor_id, value, unit, "
+            "    ROW_NUMBER() OVER ("
+            "      PARTITION BY device_id, sensor_id "
+            "      ORDER BY timestamp DESC, rowid DESC"
+            "    ) AS rn "
+            "  FROM readings"
+            ") "
+            "WHERE rn = 1 "
+            "ORDER BY device_id, sensor_id",
+        )
+        rows = await cursor.fetchall()
+        return [
+            Reading(timestamp=r[0], device_id=r[1], sensor_id=r[2], value=r[3], unit=r[4])
+            for r in rows
+        ]
+
+    async def search_anomalies(
+        self,
+        threshold_sigma: float = 2.0,
+        baseline_days: int = 30,
+    ) -> list[AnomalyResult]:
+        """Find sensors whose latest reading deviates from their rolling baseline.
+
+        Computes mean and stddev over the last `baseline_days` days per sensor,
+        then flags any sensor whose most recent reading exceeds `threshold_sigma`
+        standard deviations from the mean.
+
+        This is simple statistical detection, not ML-based. It will false-positive
+        on periodic signals (HVAC cycles, batch processes). Good enough for v1.
+        """
+        db = self._conn()
+        cutoff = time.time() - (baseline_days * 86400)
+
+        cursor = await db.execute(
+            """
+            WITH baseline AS (
+                SELECT
+                    device_id,
+                    sensor_id,
+                    AVG(value) AS mean,
+                    -- population stddev; coalesce to 0 for single-reading sensors
+                    COALESCE(
+                        SQRT(AVG(value * value) - AVG(value) * AVG(value)),
+                        0
+                    ) AS stddev,
+                    COUNT(*) AS sample_count
+                FROM readings
+                WHERE timestamp >= ?
+                  AND downsampled = 0
+                GROUP BY device_id, sensor_id
+                HAVING COUNT(*) >= 2
+            ),
+            latest AS (
+                SELECT device_id, sensor_id, value, unit
+                FROM (
+                    SELECT device_id, sensor_id, value, unit,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY device_id, sensor_id
+                            ORDER BY timestamp DESC, rowid DESC
+                        ) AS rn
+                    FROM readings
+                    WHERE downsampled = 0
+                )
+                WHERE rn = 1
             )
-        else:
-            cursor = await self.db.execute(
-                "SELECT * FROM alerts WHERE timestamp>=? ORDER BY timestamp DESC LIMIT ?",
-                (cutoff, limit),
-            )
-        return await cursor.fetchall()
-
-    async def acknowledge_alert(self, alert_id: int, ack_by: str):
-        await self.db.execute(
-            "UPDATE alerts SET ack_at=?, ack_by=? WHERE id=?",
-            (int(time.time()), ack_by, alert_id),
+            SELECT
+                l.device_id,
+                l.sensor_id,
+                l.value AS current_value,
+                b.mean,
+                b.stddev,
+                l.unit
+            FROM latest l
+            JOIN baseline b
+                ON l.device_id = b.device_id
+                AND l.sensor_id = b.sensor_id
+            WHERE b.stddev > 0
+              AND ABS(l.value - b.mean) > ? * b.stddev
+            ORDER BY ABS(l.value - b.mean) / b.stddev DESC
+            """,
+            (cutoff, threshold_sigma),
         )
-        await self.db.commit()
-
-    # ── Devices ───────────────────────────────────────────────
-
-    async def register_device(self, node_id: int, dtype: str, name: str,
-                               location: str = None, sensors: str = None,
-                               config: str = None):
-        await self.db.execute(
-            "INSERT OR REPLACE INTO devices (node_id, type, name, location, sensors, config) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (node_id, dtype, name, location, sensors, config),
-        )
-        await self.db.commit()
-
-    async def update_device_status(self, node_id: int, status: str,
-                                    battery_pct: int = None):
-        if battery_pct is not None:
-            await self.db.execute(
-                "UPDATE devices SET status=?, last_seen=?, battery_pct=? WHERE node_id=?",
-                (status, int(time.time()), battery_pct, node_id),
+        rows = await cursor.fetchall()
+        return [
+            AnomalyResult(
+                device_id=r[0],
+                sensor_id=r[1],
+                current_value=r[2],
+                mean=r[3],
+                stddev=r[4],
+                sigma_distance=abs(r[2] - r[3]) / r[4] if r[4] > 0 else 0,
+                unit=r[5],
             )
-        else:
-            await self.db.execute(
-                "UPDATE devices SET status=?, last_seen=? WHERE node_id=?",
-                (status, int(time.time()), node_id),
-            )
-        await self.db.commit()
-
-    async def list_devices(self):
-        cursor = await self.db.execute("SELECT * FROM devices ORDER BY node_id")
-        return await cursor.fetchall()
-
-    async def get_device(self, node_id: int):
-        cursor = await self.db.execute("SELECT * FROM devices WHERE node_id=?", (node_id,))
-        return await cursor.fetchone()
-
-    # ── Actuation Log ─────────────────────────────────────────
-
-    async def log_actuation(self, node_id: int, actuator_id: str, command: str,
-                             triggered_by: str, status: str, timestamp: int,
-                             params: str = None, duration_sec: int = None,
-                             confirmed_by: str = None):
-        await self.db.execute(
-            "INSERT INTO actuation_log (node_id, actuator_id, command, params, duration_sec, "
-            "triggered_by, confirmed_by, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (node_id, actuator_id, command, params, duration_sec,
-             triggered_by, confirmed_by, status, timestamp),
-        )
-        await self.db.commit()
-
-    # ── Retention ─────────────────────────────────────────────
-
-    async def run_retention(self, full_resolution_days: int = 30):
-        """Downsample/purge readings and alerts older than full_resolution_days."""
-        cutoff = int(time.time()) - full_resolution_days * 86400
-        await self.db.execute("DELETE FROM readings WHERE timestamp < ?", (cutoff,))
-        await self.db.execute("DELETE FROM alerts WHERE timestamp < ?", (cutoff,))
-        await self.db.commit()
+            for r in rows
+        ]

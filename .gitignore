@@ -223,5 +223,5 @@ data/
 # Planning files
 .omo/
 
-# Device profiles (user configuration)
-devices/*.toml
+# Migration backup
+_backup/

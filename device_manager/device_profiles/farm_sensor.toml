@@ -1,0 +1,31 @@
+[device]
+name = "farm_sensor"
+description = "Mock soil moisture & temperature sensor"
+
+[connection]
+protocol = "mock"
+
+[connection.mock_responses]
+READ = "25.3"
+PING = "PONG"
+
+[[tools]]
+name = "get_moisture"
+description = "Get current soil moisture"
+command = "READ"
+[tools.returns]
+type = "float"
+unit = "percent"
+
+[[tools]]
+name = "get_temperature"
+description = "Get current air temperature"
+command = "READ"
+[tools.returns]
+type = "float"
+unit = "celsius"
+
+[health]
+check_command = "PING"
+expected = "PONG"
+interval_ms = 30000

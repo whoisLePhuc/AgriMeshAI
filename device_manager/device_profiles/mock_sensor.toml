@@ -1,10 +1,29 @@
-# Mock variant of the serial sensor profile for testing without hardware.
+# Mock Sensor — simulated device for end-to-end testing without hardware
+#
+# This profile uses the mock adapter with canned responses. Run it with:
+#
+#   agrimesh start -p profiles
+#
+# Then connect any MCP client. The mock device responds to the same
+# commands as the serial_sensor profile, but returns fixed values
+# instead of talking to real hardware.
+
 [device]
-name = "serial_sensor"
-description = "Sensor connected via serial (UART/USB)"
+name = "mock_sensor"
+description = "Simulated temperature + humidity sensor for testing"
 
 [connection]
 protocol = "mock"
+timeout_ms = 1000
+
+# Canned responses: command → response value.
+# The mock adapter looks up the command string here and returns the value.
+[connection.mock_responses]
+READ_TEMP = "22.5"
+READ_HUMID = "47.3"
+READ_ALL = "22.5,47.3"
+STATUS = "OK"
+PING = "PONG"
 
 [[tools]]
 name = "get_temperature"
