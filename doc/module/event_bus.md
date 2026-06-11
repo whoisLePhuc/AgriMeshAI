@@ -87,6 +87,8 @@ Consumer (rule_engine, notifier) subscribe qua EventBus
 
 ## 2. Kiến trúc
 
+![alt text](../assets/event_bus.png)
+
 ### Các thành phần
 
 ```
