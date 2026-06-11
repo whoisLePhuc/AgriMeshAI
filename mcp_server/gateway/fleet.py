@@ -1,7 +1,7 @@
 """Fleet-level tools — cross-device queries that make AgriMeshAI valuable.
 
 These tools give an LLM the full picture in a single call rather than
-requiring sequential per-device tool calls. They bridge the aggregator
+requiring sequential per-device tool calls. They bridge the device_manager
 (live device access) and the store (historical data).
 """
 
@@ -126,7 +126,7 @@ class FleetTools:
         """Dispatch a fleet tool call. Returns a JSON-serializable result dict."""
         handler = self._handlers.get(tool_name)
         if handler is None:
-            raise ValueError(f"unknown fleet tool: {tool_name}")
+            return {"error": f"unknown fleet tool: {tool_name}"}
         return await handler(arguments)
 
     async def _list_devices(self, arguments: dict[str, Any]) -> dict[str, Any]:
