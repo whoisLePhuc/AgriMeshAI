@@ -6,9 +6,9 @@ from typing import Any
 
 from mcp.types import Tool
 
-from device_manager.src.model import DeviceModel, ToolDefinition, ToolParam
+from device_manager.model import DeviceModel, ToolDefinition, ToolParam
 
-# Map Jeltz profile types to JSON Schema types
+# Map devices profile types to JSON Schema types
 _TYPE_MAP: dict[str, str] = {
     "int": "integer",
     "integer": "integer",

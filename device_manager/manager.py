@@ -1,17 +1,23 @@
-"""Gateway aggregator — merges device tools into a unified MCP tool catalog."""
+"""DeviceManager — consolidated device lifecycle, catalog, and tool routing."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from mcp.types import Tool
 
+logger = logging.getLogger(__name__)
+
 from mcp_server.adapters.base import AdapterResult
-from device_manager.src.model import ToolParam, ToolReturns
-from device_manager.src.discovery import DiscoveredDevice
-from device_manager.src.generator import generate_tools
+from device_manager.discovery import DiscoveredDevice
+from device_manager.catalog import (
+    DeviceCatalog,
+    ToolRoute,
+)
 
 
 @dataclass
@@ -20,69 +26,46 @@ class DeviceStatus:
 
     device: DiscoveredDevice
     connected: bool = False
-    healthy: bool = False
+    healthy: bool | None = None  # None = chưa kiểm tra
     error: str | None = None
 
 
-@dataclass
-class ToolRoute:
-    """Maps a namespaced tool name back to its device and tool definition."""
-
-    device: DiscoveredDevice
-    tool_name: str  # original un-namespaced name
-    command: str | None  # the command string to send over the adapter
-    returns: ToolReturns | None = None  # return type spec for storage
-    params: dict[str, ToolParam] | None = None  # parameter definitions
-
-
-class Aggregator:
-    """Merges multiple devices into a single unified tool catalog.
-
-    Handles:
-    - Generating namespaced MCP tools from all discovered devices
-    - Routing tool calls to the correct adapter
-    - Connecting/disconnecting all devices
-    - Per-device locking for safe concurrent tool calls
+class DeviceManager:
+    """Consolidates device discovery, catalog building, connection lifecycle,
+    tool routing, and health checks into a single class.
     """
 
-    def __init__(self, devices: list[DiscoveredDevice]) -> None:
-        # Check for duplicate device names
-        seen: set[str] = set()
-        for d in devices:
-            if d.name in seen:
-                raise ValueError(f"duplicate device name: {d.name!r}")
-            seen.add(d.name)
-
-        self._devices = {d.name: d for d in devices}
+    def __init__(self, profiles_dir: str | Path) -> None:
+        self._profiles_dir = Path(profiles_dir) if isinstance(profiles_dir, str) else profiles_dir
+        self._catalog: DeviceCatalog | None = None
         self._tools: list[Tool] = []
         self._routes: dict[str, ToolRoute] = {}
-        self._status: dict[str, DeviceStatus] = {
-            d.name: DeviceStatus(device=d) for d in devices
+        self._device_locks: dict[str, asyncio.Lock] = {}
+        self._devices: dict[str, DiscoveredDevice] = {}
+        self._status: dict[str, DeviceStatus] = {}
+        self._init_catalog()
+
+    def _init_catalog(self) -> None:
+        """Build the device catalog from the profiles directory."""
+        self._catalog = DeviceCatalog.from_profiles_dir(self._profiles_dir)
+        self._tools = self._catalog.tools
+        self._routes = self._catalog.routes
+        self._device_locks = self._catalog.locks
+        self._devices = self._catalog.devices
+        self._status = {
+            name: DeviceStatus(device=d)
+            for name, d in self._devices.items()
         }
-        self._device_locks: dict[str, asyncio.Lock] = {
-            d.name: asyncio.Lock() for d in devices
-        }
-        self._build_catalog()
 
-    def _build_catalog(self) -> None:
-        """Generate the unified tool catalog from all devices."""
-        self._tools = []
-        self._routes = {}
+    def reload_catalog(self) -> None:
+        """Hot-reload profiles at runtime (for future use)."""
+        self._init_catalog()
 
-        for device in self._devices.values():
-            tools = generate_tools(device.model)
-            self._tools.extend(tools)
-
-            # Build routing table from the generated Tool names
-            # to avoid duplicating the namespacing logic
-            for mcp_tool, tool_def in zip(tools, device.model.tools):
-                self._routes[mcp_tool.name] = ToolRoute(
-                    device=device,
-                    tool_name=tool_def.name,
-                    command=tool_def.command,
-                    returns=tool_def.returns,
-                    params=tool_def.params if tool_def.params else None,
-                )
+    @property
+    def catalog(self) -> DeviceCatalog:
+        if self._catalog is None:
+            raise RuntimeError("catalog not built — call _init_catalog() first")
+        return self._catalog
 
     @property
     def tools(self) -> list[Tool]:
@@ -170,10 +153,13 @@ class Aggregator:
         if not status.connected:
             return AdapterResult.fail(f"device {device.name!r} is not connected")
 
+        if status.healthy is False:
+            logger.warning("device %s unhealthy, proceeding anyway", device.name)
+
         async with self._device_locks[device.name]:
             # If the tool has a command, interpolate arguments and send
             if route.command is not None:
-                command = route.command.format(**arguments) if arguments else route.command
+                command = route.command.format(**(arguments or {}))
                 send_result = await device.adapter.send(command)
                 if not send_result.success:
                     return send_result
@@ -184,7 +170,7 @@ class Aggregator:
                 f"tool {namespaced_name!r} has no command"
                 " and handler dispatch is not yet implemented"
             )
-
+````
     async def health_check_all(self) -> dict[str, AdapterResult]:
         """Run health checks on all connected devices concurrently.
 

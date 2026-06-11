@@ -12,7 +12,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mcp_server.gateway.aggregator import Aggregator, ToolRoute
+    from device_manager.manager import DeviceManager
+    from device_manager.catalog import ToolRoute
     from recorder.store import ReadingStore
 
 from mcp_server.event_bus import EventBus
@@ -23,15 +24,15 @@ logger = logging.getLogger(__name__)
 _NUMERIC_TYPES = {"float", "number", "int", "integer"}
 
 
-def _recordable_routes(aggregator: Aggregator) -> dict[str, list[ToolRoute]]:
+def _recordable_routes(device_manager: DeviceManager) -> dict[str, list[ToolRoute]]:
     """Group recordable tool routes by device name.
 
     A tool is recordable if it has a command (not handler-only) and returns
     a numeric type.
     """
     by_device: dict[str, list[ToolRoute]] = {}
-    for namespaced_name in aggregator.route_names:
-        route = aggregator.get_route(namespaced_name)
+    for namespaced_name in device_manager.route_names:
+        route = device_manager.get_route(namespaced_name)
         if route is None:
             continue
         # Skip devices with recording disabled
@@ -51,7 +52,7 @@ def _recordable_routes(aggregator: Aggregator) -> dict[str, list[ToolRoute]]:
 async def _poll_device(
     device_name: str,
     routes: list[ToolRoute],
-    aggregator: Aggregator,
+    device_manager: DeviceManager,
     store: ReadingStore,
     interval_s: float,
     stop_event: asyncio.Event,
@@ -67,7 +68,7 @@ async def _poll_device(
         for route in routes:
             namespaced = f"{device_name}.{route.tool_name}"
             try:
-                result = await aggregator.call_tool(namespaced, {})
+                result = await device_manager.call_tool(namespaced, {})
                 if not result.success:
                     logger.debug("recorder: %s returned error: %s", namespaced, result.error)
                     continue
@@ -105,7 +106,7 @@ async def _poll_device(
 
 
 async def run_recorder(
-    aggregator: Aggregator,
+    device_manager: DeviceManager,
     store: ReadingStore,
     stop_event: asyncio.Event,
     bus: EventBus | None = None,
@@ -115,7 +116,7 @@ async def run_recorder(
     Blocks until stop_event is set. Each device runs in its own task so
     a slow/stuck serial device doesn't block polling of other devices.
     """
-    by_device = _recordable_routes(aggregator)
+    by_device = _recordable_routes(device_manager)
 
     if not by_device:
         logger.info("recorder: no recordable sensors found, background recording disabled")
@@ -134,7 +135,7 @@ async def run_recorder(
         interval_s = device.model.recording.poll_interval_ms / 1000.0
 
         task = asyncio.create_task(
-            _poll_device(device_name, routes, aggregator, store, interval_s, stop_event),
+            _poll_device(device_name, routes, device_manager, store, interval_s, stop_event),
             name=f"recorder:{device_name}",
         )
         tasks.append(task)
