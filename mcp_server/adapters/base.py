@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from device_manager.src.model import ConnectionConfig
+from device_manager.model import ConnectionConfig
 
 
 @dataclass

@@ -13,7 +13,7 @@ from typing import Any
 
 from mcp.types import Tool
 
-from mcp_server.gateway.aggregator import Aggregator
+from device_manager.manager import DeviceManager
 from recorder.store import ReadingStore
 
 # The four fleet tools, defined as MCP Tool schemas
@@ -108,8 +108,8 @@ _HandlerFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 class FleetTools:
     """Implements the fleet-level tool handlers."""
 
-    def __init__(self, aggregator: Aggregator, store: ReadingStore) -> None:
-        self._aggregator = aggregator
+    def __init__(self, device_manager: DeviceManager, store: ReadingStore) -> None:
+        self._device_manager = device_manager
         self._store = store
         self._handlers: dict[str, _HandlerFn] = {
             "fleet.list_devices": self._list_devices,
@@ -130,7 +130,7 @@ class FleetTools:
         return await handler(arguments)
 
     async def _list_devices(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        statuses = self._aggregator.all_statuses()
+        statuses = self._device_manager.all_statuses()
         devices = []
         for name, status in statuses.items():
             devices.append({

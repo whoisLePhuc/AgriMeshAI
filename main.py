@@ -97,7 +97,7 @@ def run_agent(devices_dir: str = "devices", db_path: str = "data/agrimesh.db") -
     asyncio.set_event_loop(loop)
     _sync_call(loop, server.start())
 
-    device_count = len(server.aggregator.device_names) if server.aggregator else 0
+    device_count = len(server.device_manager.device_names) if server.device_manager else 0
     tool_count = len(server.handle_list_tools())
     print(f"✓ Gateway ready — {device_count} device(s), {tool_count} tool(s)")
 
@@ -176,34 +176,32 @@ def run_daemon(
 
 def run_status(devices_dir: str = "devices") -> None:
     """Quick status check — shows devices and health."""
-    from mcp_server.gateway.aggregator import Aggregator
-    from device_manager.src.discovery import discover_devices
+    from device_manager.manager import DeviceManager
 
-    discovery = discover_devices(Path(devices_dir))
-    for path, error in discovery.errors:
+    dm = DeviceManager(Path(devices_dir))
+    for path, error in dm.catalog.errors:
         print(f"  ⚠ {path.name}: {error}")
 
-    if not discovery.devices:
+    if not dm.catalog.devices:
         print("No devices found.")
         return
 
     async def _check():
-        agg = Aggregator(discovery.devices)
-        await agg.connect_all()
-        await agg.health_check_all()
-        print(f"Devices ({len(discovery.devices)}):\n")
-        for name in agg.device_names:
-            ds = agg.get_status(name)
+        await dm.connect_all()
+        await dm.health_check_all()
+        print(f"Devices ({len(dm.catalog.devices)}):\n")
+        for name in dm.device_names:
+            ds = dm.get_status(name)
             if ds is None:
                 continue
             proto = ds.device.model.connection.protocol
-            if ds.connected and ds.healthy:
+            if ds.connected and ds.healthy is True:
                 print(f"  ✓ {name} [{proto}] — healthy")
             elif ds.connected:
-                print(f"  ~ {name} [{proto}] — connected (unhealthy)")
+                print(f"  ~ {name} [{proto}] — connected (unhealthy or not checked)")
             else:
                 print(f"  ✗ {name} [{proto}] — {ds.error or 'unknown'}")
-        await agg.disconnect_all()
+        await dm.disconnect_all()
 
     asyncio.run(_check())
 

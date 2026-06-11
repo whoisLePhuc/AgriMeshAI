@@ -6,7 +6,7 @@ import asyncio
 from typing import Any
 
 from mcp_server.adapters.base import AdapterResult, BaseAdapter
-from device_manager.src.model import ConnectionConfig
+from device_manager.model import ConnectionConfig
 
 
 class MockAdapter(BaseAdapter):

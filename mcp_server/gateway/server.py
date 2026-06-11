@@ -28,10 +28,10 @@ from mcp.types import (
 )
 
 from mcp_server.event_bus import EventBus
-from mcp_server.gateway.aggregator import Aggregator
+from device_manager.manager import DeviceManager
 from rule_engine import RuleEngine
 from notifier import NotifierManager
-from device_manager.src.discovery import DiscoveryResult, discover_devices
+from device_manager.discovery import DiscoveryResult
 from mcp_server.gateway.fleet import FleetTools
 from mcp_server.gateway.recorder import run_recorder
 from recorder.retention import run_cleanup
@@ -48,7 +48,7 @@ class AgriMeshAIServer:
 
     Wires together:
     - Discovery: scans profiles dir, instantiates adapters
-    - Aggregator: unified tool catalog, per-device routing
+    - DeviceManager: unified tool catalog, per-device routing
     - Fleet tools: cross-device queries backed by the store
     - Store: SQLite time-series storage
     - EventBus: pub/sub for decoupled inter-module communication
@@ -61,7 +61,7 @@ class AgriMeshAIServer:
     ) -> None:
         self._devices_dir = devices_dir
         self._db_path = db_path
-        self._aggregator: Aggregator | None = None
+        self._device_manager: DeviceManager | None = None
         self._fleet: FleetTools | None = None
         self._store: ReadingStore | None = None
         self._server = Server(name="agrimesh", version="0.1.0")
@@ -85,8 +85,8 @@ class AgriMeshAIServer:
     def handle_list_tools(self) -> list[Tool]:
         """Build the unified tool catalog from device + fleet tools."""
         tools: list[Tool] = []
-        if self._aggregator:
-            tools.extend(self._aggregator.tools)
+        if self._device_manager:
+            tools.extend(self._device_manager.tools)
         if self._fleet:
             tools.extend(self._fleet.tools)
         return tools
@@ -113,8 +113,8 @@ class AgriMeshAIServer:
                 )
 
         # Device tools
-        if self._aggregator:
-            adapter_result = await self._aggregator.call_tool(name, args)
+        if self._device_manager:
+            adapter_result = await self._device_manager.call_tool(name, args)
             if adapter_result.success:
                 # Only record on client tool calls — the background
                 # recorder handles periodic recording in daemon mode.
@@ -147,10 +147,10 @@ class AgriMeshAIServer:
         Best-effort — failures are logged, never raised. The tool call
         has already succeeded; storage is a side effect.
         """
-        if not self._store or not self._aggregator:
+        if not self._store or not self._device_manager:
             return
 
-        route = self._aggregator.get_route(tool_name)
+        route = self._device_manager.get_route(tool_name)
         if not route or not route.returns:
             return
 
@@ -196,22 +196,22 @@ class AgriMeshAIServer:
         self._store = ReadingStore(db_path=self._db_path)
         await self._store.init()
 
-        # Discover devices
-        discovery = discover_devices(self._devices_dir)
-        for path, error in discovery.errors:
+        # Build device manager and catalog
+        self._device_manager = DeviceManager(self._devices_dir)
+        catalog = self._device_manager.build_catalog()
+        for path, error in catalog.errors:
             logger.warning("skipped profile %s: %s", path, error)
 
         # Reject reserved device names
-        for device in discovery.devices:
+        for device in catalog.devices.values():
             if device.name in _RESERVED_NAMES:
                 raise ValueError(
                     f"device name {device.name!r} is reserved"
                     f" (reserved names: {sorted(_RESERVED_NAMES)})"
                 )
 
-        # Build aggregator and connect
-        self._aggregator = Aggregator(discovery.devices)
-        results = await self._aggregator.connect_all()
+        # Connect all devices
+        results = await self._device_manager.connect_all()
         for name, result in results.items():
             if result.success:
                 logger.info("connected: %s", name)
@@ -219,7 +219,7 @@ class AgriMeshAIServer:
                 logger.warning("failed to connect %s: %s", name, result.error)
 
         # Wire up fleet tools
-        self._fleet = FleetTools(self._aggregator, self._store)
+        self._fleet = FleetTools(self._device_manager, self._store)
 
         # Wire up rule engine (auto-subscribes to EventBus)
         self._rule_engine = RuleEngine(
@@ -235,15 +235,18 @@ class AgriMeshAIServer:
         )
         self._notifier = NotifierManager(self._bus, config_path=notifier_path)
 
-        return discovery
+        return DiscoveryResult(
+            devices=list(catalog.devices.values()),
+            errors=catalog.errors,
+        )
 
     async def stop(self) -> None:
         """Disconnect devices and close the store."""
-        if self._aggregator:
-            await self._aggregator.disconnect_all()
+        if self._device_manager:
+            await self._device_manager.disconnect_all()
         if self._store:
             await self._store.close()
-        self._aggregator = None
+        self._device_manager = None
         self._fleet = None
         self._store = None
 
@@ -372,7 +375,7 @@ class AgriMeshAIServer:
 
         import uvicorn
 
-        if not self._aggregator or not self._store:
+        if not self._device_manager or not self._store:
             raise RuntimeError("server not started — call start() first")
 
         stop_event = asyncio.Event()
@@ -406,7 +409,7 @@ class AgriMeshAIServer:
                     pass
 
         tasks = [
-            run_recorder(self._aggregator, self._store, stop_event, bus=self._bus),
+            run_recorder(self._device_manager, self._store, stop_event, bus=self._bus),
             self._run_retention_loop(stop_event),
             _missing_data_loop(),
             http_server.serve(),
@@ -438,8 +441,8 @@ class AgriMeshAIServer:
         await self.run_daemon_loops(host=host, port=port)
 
     @property
-    def aggregator(self) -> Aggregator | None:
-        return self._aggregator
+    def device_manager(self) -> DeviceManager | None:
+        return self._device_manager
 
     @property
     def fleet(self) -> FleetTools | None:

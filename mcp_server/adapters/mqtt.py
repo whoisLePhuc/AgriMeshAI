@@ -16,7 +16,7 @@ import logging
 import paho.mqtt.client as mqtt
 
 from mcp_server.adapters.base import AdapterResult, BaseAdapter
-from device_manager.src.model import ConnectionConfig
+from device_manager.model import ConnectionConfig
 
 logger = logging.getLogger(__name__)
 

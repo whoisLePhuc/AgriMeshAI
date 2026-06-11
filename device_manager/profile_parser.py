@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from device_manager.src.model import DeviceModel
+from device_manager.model import DeviceModel
 
 
 class ProfileError(Exception):
