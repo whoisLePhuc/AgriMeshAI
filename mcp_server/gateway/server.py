@@ -27,7 +27,7 @@ from mcp.types import (
     ToolsCapability,
 )
 
-from mcp_server.event_bus import EventBus
+from event_bus import EventBus, EventQueueManager
 from device_manager.manager import DeviceManager
 from rule_engine import RuleEngine
 from notifier import NotifierManager
@@ -67,6 +67,7 @@ class AgriMeshAIServer:
         self._server = Server(name="agrimesh", version="0.1.0")
         self._daemon_active = False
         self._bus = EventBus()
+        self._event_queue = EventQueueManager(maxsize=100)
         self._rule_engine = None
         self._notifier = None
         self._register_handlers()
@@ -174,7 +175,7 @@ class AgriMeshAIServer:
                 value=value,
                 unit=unit,
             )
-            await self._bus.emit(
+            await self._event_queue.publish(
                 "reading_recorded",
                 device_id=route.device.name,
                 sensor_id=route.tool_name,
@@ -198,7 +199,8 @@ class AgriMeshAIServer:
 
         # Build device manager and catalog
         self._device_manager = DeviceManager(self._devices_dir)
-        catalog = self._device_manager.build_catalog()
+        self._device_manager.reload_catalog()
+        catalog = self._device_manager.catalog
         for path, error in catalog.errors:
             logger.warning("skipped profile %s: %s", path, error)
 
@@ -235,6 +237,11 @@ class AgriMeshAIServer:
         )
         self._notifier = NotifierManager(self._bus, config_path=notifier_path)
 
+        # Start event queue and bridge to bus so consumers still receive events
+        await self._event_queue.start()
+        self._event_queue.subscribe("reading_recorded", lambda **data: self._bus.emit("reading_recorded", **data))
+        self._event_queue.subscribe("alert_triggered", lambda **data: self._bus.emit("alert_triggered", **data))
+
         return DiscoveryResult(
             devices=list(catalog.devices.values()),
             errors=catalog.errors,
@@ -246,6 +253,8 @@ class AgriMeshAIServer:
             await self._device_manager.disconnect_all()
         if self._store:
             await self._store.close()
+        if self._event_queue:
+            await self._event_queue.stop()
         self._device_manager = None
         self._fleet = None
         self._store = None
@@ -409,7 +418,7 @@ class AgriMeshAIServer:
                     pass
 
         tasks = [
-            run_recorder(self._device_manager, self._store, stop_event, bus=self._bus),
+            run_recorder(self._device_manager, self._store, stop_event, bus=self._event_queue),
             self._run_retention_loop(stop_event),
             _missing_data_loop(),
             http_server.serve(),
@@ -456,6 +465,11 @@ class AgriMeshAIServer:
     def bus(self) -> EventBus:
         """Application-level event bus for inter-module communication."""
         return self._bus
+
+    @property
+    def event_queue(self):
+        """Event queue manager for async event publication."""
+        return self._event_queue
 
     @property
     def rule_engine(self):

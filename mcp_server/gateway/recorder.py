@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from device_manager.catalog import ToolRoute
     from recorder.store import ReadingStore
 
-from mcp_server.event_bus import EventBus
+from event_bus import EventQueueManager
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ async def _poll_device(
     store: ReadingStore,
     interval_s: float,
     stop_event: asyncio.Event,
-    bus: EventBus | None = None,
+    bus: EventQueueManager | None = None,
 ) -> None:
     """Poll a single device's recordable tools at a fixed interval."""
     logger.info(
@@ -87,7 +87,7 @@ async def _poll_device(
                     unit=unit or "",
                 )
                 if bus:
-                    await bus.emit(
+                    await bus.publish(
                         "reading_recorded",
                         device_id=device_name,
                         sensor_id=route.tool_name,
@@ -109,7 +109,7 @@ async def run_recorder(
     device_manager: DeviceManager,
     store: ReadingStore,
     stop_event: asyncio.Event,
-    bus: EventBus | None = None,
+    bus: EventQueueManager | None = None,
 ) -> None:
     """Start per-device polling loops for all recordable devices.
 
