@@ -1,6 +1,6 @@
 """MCP server — the unified endpoint that wires everything together.
 
-Connects discovery, aggregator, fleet tools, and storage behind a single
+Connects discovery, device_manager, fleet tools, and storage behind a single
 MCP server. Clients see one flat tool catalog: namespaced device tools
 plus fleet-level tools.
 
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any
 
 from mcp.server import InitializationOptions
@@ -27,49 +26,20 @@ from mcp.types import (
     ToolsCapability,
 )
 
-from event_bus import EventBus, EventQueueManager
-from device_manager.manager import DeviceManager
-from rule_engine import RuleEngine
-from notifier import NotifierManager
-from device_manager.discovery import DiscoveryResult
-from mcp_server.gateway.fleet import FleetTools
 from mcp_server.gateway.recorder import run_recorder
 from recorder.retention import run_cleanup
-from recorder.store import ReadingStore
+from system.manager import SystemManager
 
 logger = logging.getLogger(__name__)
 
-# Device names that would collide with fleet tool routing
-_RESERVED_NAMES = {"fleet"}
-
 
 class AgriMeshAIServer:
-    """The AgriMeshAI MCP gateway server.
+    """Chỉ xử lý MCP protocol. Nhận SystemManager qua DI."""
 
-    Wires together:
-    - Discovery: scans profiles dir, instantiates adapters
-    - DeviceManager: unified tool catalog, per-device routing
-    - Fleet tools: cross-device queries backed by the store
-    - Store: SQLite time-series storage
-    - EventBus: pub/sub for decoupled inter-module communication
-    """
-
-    def __init__(
-        self,
-        devices_dir: Path,
-        db_path: str | Path = "data/agrimesh.db",
-    ) -> None:
-        self._devices_dir = devices_dir
-        self._db_path = db_path
-        self._device_manager: DeviceManager | None = None
-        self._fleet: FleetTools | None = None
-        self._store: ReadingStore | None = None
+    def __init__(self, system: SystemManager) -> None:
+        self._system = system
         self._server = Server(name="agrimesh", version="0.1.0")
         self._daemon_active = False
-        self._bus = EventBus()
-        self._event_queue = EventQueueManager(maxsize=100)
-        self._rule_engine = None
-        self._notifier = None
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -85,12 +55,7 @@ class AgriMeshAIServer:
 
     def handle_list_tools(self) -> list[Tool]:
         """Build the unified tool catalog from device + fleet tools."""
-        tools: list[Tool] = []
-        if self._device_manager:
-            tools.extend(self._device_manager.tools)
-        if self._fleet:
-            tools.extend(self._fleet.tools)
-        return tools
+        return self._system.list_tools()
 
     async def handle_call_tool(
         self, name: str, arguments: dict[str, Any] | None
@@ -99,13 +64,20 @@ class AgriMeshAIServer:
         args = arguments or {}
 
         # Fleet tools
-        if name.startswith("fleet.") and self._fleet:
+        if name.startswith("fleet."):
             try:
-                result = await self._fleet.call(name, args)
-                return CallToolResult(
-                    content=[TextContent(type="text", text=str(result))],
-                    structuredContent=result,
-                )
+                result = await self._system.call_tool(name, args)
+                if result.success:
+                    data = result.data
+                    return CallToolResult(
+                        content=[TextContent(type="text", text=str(data))],
+                        structuredContent=data,
+                    )
+                else:
+                    return CallToolResult(
+                        content=[TextContent(type="text", text=result.error or "unknown error")],
+                        isError=True,
+                    )
             except Exception as e:
                 logger.exception("fleet tool %s failed", name)
                 return CallToolResult(
@@ -114,30 +86,24 @@ class AgriMeshAIServer:
                 )
 
         # Device tools
-        if self._device_manager:
-            adapter_result = await self._device_manager.call_tool(name, args)
-            if adapter_result.success:
-                # Only record on client tool calls — the background
-                # recorder handles periodic recording in daemon mode.
-                if not self._daemon_active:
-                    await self._maybe_record(name, adapter_result.data)
-                data = {"data": adapter_result.data}
-                return CallToolResult(
-                    content=[TextContent(type="text", text=str(data))],
-                    structuredContent=data,
-                )
-            else:
-                return CallToolResult(
-                    content=[TextContent(
-                        type="text", text=adapter_result.error or "unknown error",
-                    )],
-                    isError=True,
-                )
-
-        return CallToolResult(
-            content=[TextContent(type="text", text=f"unknown tool: {name}")],
-            isError=True,
-        )
+        adapter_result = await self._system.call_tool(name, args)
+        if adapter_result.success:
+            # Only record on client tool calls — the background
+            # recorder handles periodic recording in daemon mode.
+            if not self._daemon_active:
+                await self._maybe_record(name, adapter_result.data)
+            data = {"data": adapter_result.data}
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(data))],
+                structuredContent=data,
+            )
+        else:
+            return CallToolResult(
+                content=[TextContent(
+                    type="text", text=adapter_result.error or "unknown error",
+                )],
+                isError=True,
+            )
 
     # Types that can be stored as float in the time-series store
     _NUMERIC_TYPES = {"float", "number", "int", "integer"}
@@ -148,10 +114,12 @@ class AgriMeshAIServer:
         Best-effort — failures are logged, never raised. The tool call
         has already succeeded; storage is a side effect.
         """
-        if not self._store or not self._device_manager:
+        dm = self._system.device_manager
+        store = self._system.store
+        if store is None:
             return
 
-        route = self._device_manager.get_route(tool_name)
+        route = dm.get_route(tool_name)
         if not route or not route.returns:
             return
 
@@ -169,13 +137,13 @@ class AgriMeshAIServer:
 
         unit = route.returns.unit or ""
         try:
-            await self._store.record(
+            await store.record(
                 device_id=route.device.name,
                 sensor_id=route.tool_name,
                 value=value,
                 unit=unit,
             )
-            await self._event_queue.publish(
+            await self._system.event_queue.publish(
                 "reading_recorded",
                 device_id=route.device.name,
                 sensor_id=route.tool_name,
@@ -185,84 +153,12 @@ class AgriMeshAIServer:
         except Exception:
             logger.warning("failed to record reading for %s", tool_name, exc_info=True)
 
-    async def start(self) -> DiscoveryResult:
-        """Initialize store, discover devices, connect adapters.
-
-        Returns the discovery result so callers can inspect errors.
-        """
-        if self._store is not None:
-            raise RuntimeError("server already started — call stop() first")
-
-        # Initialize storage
-        self._store = ReadingStore(db_path=self._db_path)
-        await self._store.init()
-
-        # Build device manager and catalog
-        self._device_manager = DeviceManager(self._devices_dir)
-        self._device_manager.reload_catalog()
-        catalog = self._device_manager.catalog
-        for path, error in catalog.errors:
-            logger.warning("skipped profile %s: %s", path, error)
-
-        # Reject reserved device names
-        for device in catalog.devices.values():
-            if device.name in _RESERVED_NAMES:
-                raise ValueError(
-                    f"device name {device.name!r} is reserved"
-                    f" (reserved names: {sorted(_RESERVED_NAMES)})"
-                )
-
-        # Connect all devices
-        results = await self._device_manager.connect_all()
-        for name, result in results.items():
-            if result.success:
-                logger.info("connected: %s", name)
-            else:
-                logger.warning("failed to connect %s: %s", name, result.error)
-
-        # Wire up fleet tools
-        self._fleet = FleetTools(self._device_manager, self._store)
-
-        # Wire up rule engine (auto-subscribes to EventBus)
-        self._rule_engine = RuleEngine(
-            self._bus,
-            self._store,
-            rules_path=str(Path(__file__).parent.parent.parent / "config" / "rules.yaml"),
-        )
-        logger.info("rule engine: %d rule(s) loaded", len(self._rule_engine.rules))
-
-        # Wire up notifier manager (auto-subscribes to alert_triggered)
-        notifier_path = str(
-            Path(__file__).parent.parent.parent / "config" / "notifiers.yaml"
-        )
-        self._notifier = NotifierManager(self._bus, config_path=notifier_path)
-
-        # Start event queue and bridge to bus so consumers still receive events
-        await self._event_queue.start()
-        self._event_queue.subscribe("reading_recorded", lambda **data: self._bus.emit("reading_recorded", **data))
-        self._event_queue.subscribe("alert_triggered", lambda **data: self._bus.emit("alert_triggered", **data))
-
-        return DiscoveryResult(
-            devices=list(catalog.devices.values()),
-            errors=catalog.errors,
-        )
-
-    async def stop(self) -> None:
-        """Disconnect devices and close the store."""
-        if self._device_manager:
-            await self._device_manager.disconnect_all()
-        if self._store:
-            await self._store.close()
-        if self._event_queue:
-            await self._event_queue.stop()
-        self._device_manager = None
-        self._fleet = None
-        self._store = None
+    # ------------------------------------------------------------------
+    # stdio transport
+    # ------------------------------------------------------------------
 
     async def serve_stdio(self) -> None:
-        """Serve MCP over stdio transport. Call start() first."""
-        if self._store is None:
-            raise RuntimeError("server not started — call start() first")
+        """Serve MCP over stdio transport. Call system.start() first."""
         async with stdio_server() as (read_stream, write_stream):
             init_options = InitializationOptions(
                 server_name="agrimesh",
@@ -274,40 +170,16 @@ class AgriMeshAIServer:
             )
 
     async def run_stdio(self) -> None:
-        """Start the server and run over stdio transport."""
+        """Start the system and run over stdio transport."""
         try:
-            await self.start()
+            await self._system.start()
             await self.serve_stdio()
         finally:
-            await self.stop()
+            await self._system.stop()
 
     # ------------------------------------------------------------------
-    # Daemon mode: background recording + Streamable HTTP transport
+    # HTTP transport
     # ------------------------------------------------------------------
-
-    async def _run_retention_loop(
-        self, stop_event: asyncio.Event, interval_hours: float = 6.0
-    ) -> None:
-        """Run retention cleanup on startup and periodically."""
-        if not self._store:
-            return
-        while not stop_event.is_set():
-            try:
-                counts = await run_cleanup(self._store)
-                if counts["downsampled"] or counts["purged"]:
-                    logger.info(
-                        "retention: downsampled %d, purged %d",
-                        counts["downsampled"], counts["purged"],
-                    )
-            except Exception:
-                logger.warning("retention cleanup failed", exc_info=True)
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=interval_hours * 3600
-                )
-                break
-            except TimeoutError:
-                pass
 
     def _build_http_app(self) -> tuple[Any, Any]:
         """Build a Starlette ASGI app that serves MCP over Streamable HTTP.
@@ -353,20 +225,46 @@ class AgriMeshAIServer:
         return app, session_manager
 
     async def serve_http(self, host: str = "127.0.0.1", port: int = 8374) -> None:
-        """Serve MCP over Streamable HTTP transport. Call start() first.
+        """Serve MCP over Streamable HTTP transport. Call system.start() first.
 
         Runs a Starlette/uvicorn HTTP server. Clients interact via
         POST/GET/DELETE on /mcp (MCP Streamable HTTP spec).
         """
         import uvicorn
 
-        if self._store is None:
-            raise RuntimeError("server not started — call start() first")
-
         app, _ = self._build_http_app()
         config = uvicorn.Config(app, host=host, port=port, log_level="warning")
         server = uvicorn.Server(config)
         await server.serve()
+
+    # ------------------------------------------------------------------
+    # Daemon mode: background recording + Streamable HTTP transport
+    # ------------------------------------------------------------------
+
+    async def _run_retention_loop(
+        self, stop_event: asyncio.Event, interval_hours: float = 6.0
+    ) -> None:
+        """Run retention cleanup on startup and periodically."""
+        store = self._system.store
+        if not store:
+            return
+        while not stop_event.is_set():
+            try:
+                counts = await run_cleanup(store)
+                if counts["downsampled"] or counts["purged"]:
+                    logger.info(
+                        "retention: downsampled %d, purged %d",
+                        counts["downsampled"], counts["purged"],
+                    )
+            except Exception:
+                logger.warning("retention cleanup failed", exc_info=True)
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=interval_hours * 3600
+                )
+                break
+            except TimeoutError:
+                pass
 
     async def run_daemon_loops(
         self,
@@ -375,7 +273,7 @@ class AgriMeshAIServer:
     ) -> None:
         """Run daemon background tasks: recording, retention, and HTTP server.
 
-        Call ``start()`` first. Installs signal handlers for SIGINT/SIGTERM
+        Call ``system.start()`` first. Installs signal handlers for SIGINT/SIGTERM
         to trigger graceful shutdown: sets stop_event so recorder and
         retention loops can finish their current cycle, then tells uvicorn
         to exit, which collapses the TaskGroup cleanly.
@@ -384,8 +282,9 @@ class AgriMeshAIServer:
 
         import uvicorn
 
-        if not self._device_manager or not self._store:
-            raise RuntimeError("server not started — call start() first")
+        system = self._system
+        if not system.device_manager or not system.store:
+            raise RuntimeError("system not started — call system.start() first")
 
         stop_event = asyncio.Event()
         self._daemon_active = True
@@ -410,15 +309,15 @@ class AgriMeshAIServer:
 
         async def _missing_data_loop() -> None:
             while not stop_event.is_set():
-                if self._rule_engine:
-                    await self._rule_engine.check_missing(hours=1.0)
+                if system.rule_engine:
+                    await system.rule_engine.check_missing(hours=1.0)
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=300)
                 except TimeoutError:
                     pass
 
         tasks = [
-            run_recorder(self._device_manager, self._store, stop_event, bus=self._event_queue),
+            run_recorder(system.device_manager, system.store, stop_event, bus=system.event_queue),
             self._run_retention_loop(stop_event),
             _missing_data_loop(),
             http_server.serve(),
@@ -430,7 +329,7 @@ class AgriMeshAIServer:
             self._daemon_active = False
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
-            await self.stop()
+            await system.stop()
 
     async def run_daemon(
         self,
@@ -439,44 +338,17 @@ class AgriMeshAIServer:
     ) -> None:
         """Start the server in daemon mode: background recording + HTTP endpoint.
 
-        Full lifecycle: calls ``start()``, runs daemon loops, then ``stop()``.
+        Full lifecycle: calls ``system.start()``, runs daemon loops, then ``system.stop()``.
         """
         try:
-            await self.start()
+            await self._system.start()
         except Exception:
-            await self.stop()
+            await self._system.stop()
             raise
 
         await self.run_daemon_loops(host=host, port=port)
 
     @property
-    def device_manager(self) -> DeviceManager | None:
-        return self._device_manager
-
-    @property
-    def fleet(self) -> FleetTools | None:
-        return self._fleet
-
-    @property
-    def store(self) -> ReadingStore | None:
-        return self._store
-
-    @property
-    def bus(self) -> EventBus:
-        """Application-level event bus for inter-module communication."""
-        return self._bus
-
-    @property
-    def event_queue(self):
-        """Event queue manager for async event publication."""
-        return self._event_queue
-
-    @property
-    def rule_engine(self):
-        """Rule engine instance (initialized after start())."""
-        return self._rule_engine
-
-    @property
-    def notifier(self):
-        """Notifier manager instance (initialized after start())."""
-        return self._notifier
+    def system(self) -> SystemManager:
+        """The injected SystemManager instance."""
+        return self._system

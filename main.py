@@ -31,16 +31,16 @@ def _sync_call(loop: asyncio.AbstractEventLoop, coro):
     return loop.run_until_complete(coro)
 
 
-def _build_tool_bridge(server, loop: asyncio.AbstractEventLoop) -> list:
-    """Convert AgriMeshAIServer's MCP tools into edge-agent Tool objects.
+def _build_tool_bridge(system, loop: asyncio.AbstractEventLoop) -> list:
+    """Convert SystemManager's tools into edge-agent Tool objects.
 
-    Each tool proxies directly to ``server.handle_call_tool()`` — no
+    Each tool proxies directly to ``system.call_tool()`` — no
     subprocess, no JSON-RPC, no MCP transport overhead.
     """
     from src.tool import Tool as EdgeTool
     from mcp.types import Tool as MCPTool
 
-    mcp_tools: list[MCPTool] = server.handle_list_tools()
+    mcp_tools: list[MCPTool] = system.list_tools()
     tools: list[EdgeTool] = []
 
     for t in mcp_tools:
@@ -49,10 +49,10 @@ def _build_tool_bridge(server, loop: asyncio.AbstractEventLoop) -> list:
 
         def _make_tool(name: str, description: str, schema: dict) -> EdgeTool:
             def fn(**kwargs: object) -> str:
-                result = _sync_call(loop, server.handle_call_tool(name, kwargs))
-                if result.isError:
-                    return f"Error: {result.content[0].text if result.content else 'unknown'}"
-                return str(result.content[0].text) if result.content else ""
+                result = _sync_call(loop, system.call_tool(name, kwargs))
+                if result.success:
+                    return str(result.data) if result.data else ""
+                return f"Error: {result.error or 'unknown error'}"
 
             return EdgeTool(fn=fn, name=name, description=description, parameters=schema)
 
@@ -78,31 +78,46 @@ def _save_conversation(messages: list) -> None:
 
 # ── modes ────────────────────────────────────────────────────────────────────
 
-def run_agent(devices_dir: str = "devices", db_path: str = "data/agrimesh.db") -> None:
+def run_agent(
+    profiles_dir: str = "device_manager/device_profiles",
+    db_path: str = "data/agrimesh.db",
+    rules_path: str = "config/rules.yaml",
+    notifiers_path: str = "config/notifiers.yaml",
+) -> None:
     """Start the AI agent with an in-process AgriMeshAI gateway.
 
-    Loads the server, bridges all tools directly into the edge-agent,
+    Loads the system, bridges all tools directly into the edge-agent,
     and starts the interactive REPL.  No subprocess, no stdio MCP.
     """
     import yaml
+    from system import Config, SystemManager
     from mcp_server.gateway.server import AgriMeshAIServer
 
     # 1. start gateway
-    server = AgriMeshAIServer(
-        devices_dir=Path(devices_dir) if not isinstance(devices_dir, Path) else devices_dir,
+    config = Config(
+        profiles_dir=profiles_dir,
         db_path=db_path,
+        rules_path=rules_path,
+        notifiers_path=notifiers_path,
     )
+    system = SystemManager(config)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    _sync_call(loop, server.start())
 
-    device_count = len(server.device_manager.device_names) if server.device_manager else 0
-    tool_count = len(server.handle_list_tools())
+    try:
+        _sync_call(loop, system.start())
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+        _sync_call(loop, system.stop())
+        return
+
+    device_count = len(system.device_manager.device_names) if system.device_manager else 0
+    tool_count = len(system.list_tools())
     print(f"✓ Gateway ready — {device_count} device(s), {tool_count} tool(s)")
 
     # 2. bridge tools
-    tools = _build_tool_bridge(server, loop)
+    tools = _build_tool_bridge(system, loop)
 
     # 3. start agent
     config_path = os.path.join(ROOT, "config", "models.yaml")
@@ -125,17 +140,22 @@ def run_agent(devices_dir: str = "devices", db_path: str = "data/agrimesh.db") -
     print(f"✓ Agent ready (model: {model_name})")
     print(f"  Type 'exit' to quit\n")
 
-    Session(agent=agent).start()
+    try:
+        Session(agent=agent).start()
+    except KeyboardInterrupt:
+        pass
 
     # 4. shutdown
-    _sync_call(loop, server.stop())
+    _sync_call(loop, system.stop())
     loop.close()
     print("Goodbye!")
 
 
 def run_daemon(
-    devices_dir: str = "devices",
+    profiles_dir: str = "device_manager/device_profiles",
     db_path: str = "data/agrimesh.db",
+    rules_path: str = "config/rules.yaml",
+    notifiers_path: str = "config/notifiers.yaml",
     host: str = "127.0.0.1",
     port: int = 8374,
 ) -> None:
@@ -143,25 +163,30 @@ def run_daemon(
 
     Polls sensors 24/7 and serves MCP over HTTP.
     """
+    from system import Config, SystemManager
     from mcp_server.gateway.server import AgriMeshAIServer
 
-    server = AgriMeshAIServer(
-        devices_dir=Path(devices_dir),
+    config = Config(
+        profiles_dir=profiles_dir,
         db_path=db_path,
+        rules_path=rules_path,
+        notifiers_path=notifiers_path,
     )
+    system = SystemManager(config)
+    server = AgriMeshAIServer(system)
 
     async def _run():
-        discovery = await server.start()
+        discovery = await system.start()
         for path, error in discovery.errors:
             print(f"  ⚠ Skipped {path.name}: {error}", file=sys.stderr)
 
         device_count = len(discovery.devices)
         if device_count == 0:
             print("No devices found. Add TOML device configs.", file=sys.stderr)
-            await server.stop()
+            await system.stop()
             return
 
-        tool_count = len(server.handle_list_tools())
+        tool_count = len(system.list_tools())
         print(f"✓ Discovered {device_count} device(s), exposing {tool_count} tools")
         print(f"✓ MCP server ready on http://{host}:{port}/mcp")
         print(f"  Ctrl+C to stop\n")
@@ -174,24 +199,36 @@ def run_daemon(
         print("\nShutting down.")
 
 
-def run_status(devices_dir: str = "devices") -> None:
+def run_status(
+    profiles_dir: str = "device_manager/device_profiles",
+    db_path: str = "data/agrimesh.db",
+    rules_path: str = "config/rules.yaml",
+    notifiers_path: str = "config/notifiers.yaml",
+) -> None:
     """Quick status check — shows devices and health."""
-    from device_manager.manager import DeviceManager
+    from system import Config, SystemManager
 
-    dm = DeviceManager(Path(devices_dir))
-    for path, error in dm.catalog.errors:
+    config = Config(
+        profiles_dir=profiles_dir,
+        db_path=db_path,
+        rules_path=rules_path,
+        notifiers_path=notifiers_path,
+    )
+    system = SystemManager(config)
+
+    for path, error in system.device_manager.catalog.errors:
         print(f"  ⚠ {path.name}: {error}")
 
-    if not dm.catalog.devices:
+    if not system.device_manager.catalog.devices:
         print("No devices found.")
         return
 
     async def _check():
-        await dm.connect_all()
-        await dm.health_check_all()
-        print(f"Devices ({len(dm.catalog.devices)}):\n")
-        for name in dm.device_names:
-            ds = dm.get_status(name)
+        await system.start()
+        await system.device_manager.health_check_all()
+        print(f"Devices ({len(system.device_manager.catalog.devices)}):\n")
+        for name in system.device_manager.device_names:
+            ds = system.device_manager.get_status(name)
             if ds is None:
                 continue
             proto = ds.device.model.connection.protocol
@@ -201,7 +238,7 @@ def run_status(devices_dir: str = "devices") -> None:
                 print(f"  ~ {name} [{proto}] — connected (unhealthy or not checked)")
             else:
                 print(f"  ✗ {name} [{proto}] — {ds.error or 'unknown'}")
-        await dm.disconnect_all()
+        await system.stop()
 
     asyncio.run(_check())
 
@@ -212,18 +249,37 @@ def main() -> None:
     mode = sys.argv[1].lower() if len(sys.argv) > 1 else "agent"
 
     # common options
-    devices_dir = os.path.join(ROOT, "device_manager", "device_profiles")
+    profiles_dir = os.path.join(ROOT, "device_manager", "device_profiles")
     db_path = os.path.join(ROOT, "data", "agrimesh.db")
+    rules_path = os.path.join(ROOT, "config", "rules.yaml")
+    notifiers_path = os.path.join(ROOT, "config", "notifiers.yaml")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
     if mode == "agent":
-        run_agent(devices_dir=devices_dir, db_path=db_path)
+        run_agent(
+            profiles_dir=profiles_dir,
+            db_path=db_path,
+            rules_path=rules_path,
+            notifiers_path=notifiers_path,
+        )
     elif mode == "daemon":
         host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
         port = int(sys.argv[3]) if len(sys.argv) > 3 else 8374
-        run_daemon(devices_dir=devices_dir, db_path=db_path, host=host, port=port)
+        run_daemon(
+            profiles_dir=profiles_dir,
+            db_path=db_path,
+            rules_path=rules_path,
+            notifiers_path=notifiers_path,
+            host=host,
+            port=port,
+        )
     elif mode == "status":
-        run_status(devices_dir=devices_dir)
+        run_status(
+            profiles_dir=profiles_dir,
+            db_path=db_path,
+            rules_path=rules_path,
+            notifiers_path=notifiers_path,
+        )
     else:
         print(f"Usage: python main.py [agent|daemon|status]")
         print(f"  default: agent")

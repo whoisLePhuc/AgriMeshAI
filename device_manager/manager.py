@@ -12,6 +12,9 @@ from mcp.types import Tool
 
 logger = logging.getLogger(__name__)
 
+# Device names that would collide with fleet tool routing
+_RESERVED_NAMES = {"fleet"}
+
 from mcp_server.adapters.base import AdapterResult
 from device_manager.discovery import DiscoveredDevice
 from device_manager.catalog import (
@@ -56,6 +59,9 @@ class DeviceManager:
             name: DeviceStatus(device=d)
             for name, d in self._devices.items()
         }
+        reserved = {d for d in self._devices if d in _RESERVED_NAMES}
+        if reserved:
+            raise ValueError(f"reserved device names found: {sorted(reserved)}")
 
     def reload_catalog(self) -> None:
         """Hot-reload profiles at runtime (for future use)."""
