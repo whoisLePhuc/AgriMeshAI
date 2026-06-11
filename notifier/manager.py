@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from mcp_server.event_bus import EventBus
+from event_bus import EventBus
 from notifier.base import BaseNotifier
 from notifier.console import ConsoleNotifier
 from notifier.telegram import TelegramNotifier

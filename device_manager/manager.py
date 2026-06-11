@@ -170,7 +170,6 @@ class DeviceManager:
                 f"tool {namespaced_name!r} has no command"
                 " and handler dispatch is not yet implemented"
             )
-````
     async def health_check_all(self) -> dict[str, AdapterResult]:
         """Run health checks on all connected devices concurrently.
 
