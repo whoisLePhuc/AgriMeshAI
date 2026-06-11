@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from mcp_server.event_bus import EventBus
+from event_bus import EventBus
 
 if True:  # TYPE_CHECKING workaround
     from recorder.store import ReadingStore
