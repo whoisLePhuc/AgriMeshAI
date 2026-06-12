@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from device_manager.model import ConnectionConfig
+if TYPE_CHECKING:
+    from device_manager.model import ConnectionConfig
 
 
 @dataclass

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Device names that would collide with fleet tool routing
 _RESERVED_NAMES = {"fleet"}
 
-from mcp_server.adapters.base import AdapterResult
+from utils.adapters.base import AdapterResult
 from device_manager.discovery import DiscoveredDevice
 from device_manager.catalog import (
     DeviceCatalog,

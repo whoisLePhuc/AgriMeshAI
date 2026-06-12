@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import paho.mqtt.client as mqtt
 
-from mcp_server.adapters.base import AdapterResult, BaseAdapter
-from device_manager.model import ConnectionConfig
+from utils.adapters.base import AdapterResult, BaseAdapter
+
+if TYPE_CHECKING:
+    from device_manager.model import ConnectionConfig
 
 logger = logging.getLogger(__name__)
 

@@ -16,7 +16,7 @@ from device_manager.discovery import DiscoveryResult
 from recorder.store import ReadingStore
 from rule_engine import RuleEngine
 from notifier import NotifierManager
-from mcp_server.gateway.fleet import FleetTools
+from mcp_server.fleet import FleetTools
 from system.module import HealthStatus, Module
 from system.config import Config
 
@@ -199,7 +199,7 @@ class SystemManager:
         Fleet tools are dispatched to FleetTools.
         Device tools are dispatched to DeviceManager.
         """
-        from mcp_server.adapters.base import AdapterResult
+        from utils.adapters.base import AdapterResult
         if not name or "." not in name:
             return AdapterResult.fail(f"invalid tool name: {name}")
         if name.startswith(_FLEET_PREFIX):

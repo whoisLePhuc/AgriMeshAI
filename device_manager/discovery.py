@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mcp_server.adapters.base import BaseAdapter
-from mcp_server.adapters.mock import MockAdapter
-from mcp_server.adapters.mqtt import MQTTAdapter
-from mcp_server.adapters.serial import SerialAdapter
+from utils.adapters.base import BaseAdapter
+from utils.adapters.mock import MockAdapter
+from utils.adapters.mqtt import MQTTAdapter
+from utils.adapters.serial import SerialAdapter
 from device_manager.model import DeviceModel
 from device_manager.profile_parser import ProfileError, parse_profile
 

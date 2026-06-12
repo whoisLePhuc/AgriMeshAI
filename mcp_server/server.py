@@ -26,7 +26,7 @@ from mcp.types import (
     ToolsCapability,
 )
 
-from mcp_server.gateway.recorder import run_recorder
+from mcp_server.recorder import run_recorder
 from recorder.retention import run_cleanup
 from system.manager import SystemManager
 
