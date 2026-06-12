@@ -26,7 +26,7 @@ from mcp.types import (
     ToolsCapability,
 )
 
-from recorder.retention import run_cleanup
+from database_manager.retention import run_cleanup
 from system.manager import SystemManager
 
 logger = logging.getLogger(__name__)

@@ -13,7 +13,8 @@ from mcp.types import Tool
 from event_bus import EventBus, EventQueueManager
 from device_manager.manager import DeviceManager
 from device_manager.discovery import DiscoveryResult
-from recorder.store import ReadingStore
+from database_manager.store import ReadingStore
+from database_manager.manager import DatabaseManager
 from rule_engine import RuleEngine
 from notifier import NotifierManager
 from mcp_server.fleet import FleetTools
@@ -49,6 +50,7 @@ class SystemManager:
             config_path=str(config.notifiers_path),
         )
         self.fleet = FleetTools(self.device_manager, self.store)
+        self.database_manager = DatabaseManager(self.store, self.event_queue, self.event_bus)
 
     def register_module(self, name: str, module: Module) -> None:
         """Register an additional module (for extensions)."""
