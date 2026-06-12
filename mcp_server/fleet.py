@@ -26,6 +26,26 @@ FLEET_TOOLS: list[Tool] = [
             "querying specific devices."
         ),
         inputSchema={"type": "object", "properties": {}},
+        outputSchema={
+            "type": "object",
+            "properties": {
+                "devices": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "protocol": {"type": "string"},
+                            "connected": {"type": "boolean"},
+                            "healthy": {"type": "boolean"},
+                            "error": {"type": "string"},
+                            "tools": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                },
+                "count": {"type": "integer"},
+            },
+        },
     ),
     Tool(
         name="fleet.get_all_readings",
@@ -37,6 +57,16 @@ FLEET_TOOLS: list[Tool] = [
             "'anything weird?'"
         ),
         inputSchema={"type": "object", "properties": {}},
+        outputSchema={
+            "type": "object",
+            "properties": {
+                "readings": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "count": {"type": "integer"},
+            },
+        },
     ),
     Tool(
         name="fleet.get_history",
@@ -69,6 +99,19 @@ FLEET_TOOLS: list[Tool] = [
             },
             "required": ["device_id", "sensor_id"],
         },
+        outputSchema={
+            "type": "object",
+            "properties": {
+                "device_id": {"type": "string"},
+                "sensor_id": {"type": "string"},
+                "readings": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "count": {"type": "integer"},
+                "hours_requested": {"type": "number"},
+            },
+        },
     ),
     Tool(
         name="fleet.search_anomalies",
@@ -99,6 +142,18 @@ FLEET_TOOLS: list[Tool] = [
                 },
             },
         },
+        outputSchema={
+            "type": "object",
+            "properties": {
+                "anomalies": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "count": {"type": "integer"},
+                "threshold_sigma": {"type": "number"},
+                "baseline_days": {"type": "integer"},
+            },
+        },
     ),
 ]
 
@@ -126,8 +181,12 @@ class FleetTools:
         """Dispatch a fleet tool call. Returns a JSON-serializable result dict."""
         handler = self._handlers.get(tool_name)
         if handler is None:
-            return {"error": f"unknown fleet tool: {tool_name}"}
-        return await handler(arguments)
+            available = ", ".join(sorted(self._handlers.keys()))
+            return {"error": f"unknown fleet tool: {tool_name}. Available: {available}"}
+        try:
+            return await handler(arguments)
+        except Exception as e:
+            return {"error": str(e)}
 
     async def _list_devices(self, arguments: dict[str, Any]) -> dict[str, Any]:
         statuses = self._device_manager.all_statuses()
