@@ -1,6 +1,6 @@
 # THIẾT KẾ HỆ THỐNG
-## AI Agent + ML + MCP Gateway + LoRa Mesh — Nông Nghiệp Thông Minh
-**Phiên bản:** 2.1 (cập nhật hardware Jetson Nano) | **Ngày:** 03/06/2026 | **Quy mô:** POC / Vườn nhỏ — 1 người dùng, < 20 node
+## AI Agent + MCP Server + LoRa Mesh — Nông Nghiệp Thông Minh
+**Phiên bản:** 4.0 (SystemManager architecture) | **Ngày:** 12/06/2026 | **Quy mô:** POC / Vườn nhỏ — 1 người dùng, < 20 node
 
 ---
 
@@ -10,14 +10,14 @@
 2. [Phần Cứng](#2-phần-cứng)
 3. [Software Stack](#3-software-stack)
 4. [Luồng Dữ Liệu](#4-luồng-dữ-liệu)
-5. [MCP Gateway — Jeltz](#5-mcp-gateway--jeltz)
-6. [Database Schema](#6-database-schema-sqlite)
+5. [MCP Server — agrimesh](#5-mcp-server--agrimesh)
+6. [AI Agent](#6-ai-agent)
 7. [An Toàn và Bảo Mật](#7-an-toàn-và-bảo-mật)
 8. [Phát Hiện Bất Thường — Rule Engine](#8-phát-hiện-bất-thường--rule-engine)
 9. [Machine Learning](#9-machine-learning)
 10. [Kết Nối Người Dùng](#10-kết-nối-người-dùng)
 11. [Giao Thức LoRa Mesh](#11-giao-thức-lora-mesh)
-12. [Kế Hoạch Triển Khai](#12-kế-hoạch-triển-khai-poc)
+12. [Kế Hoạch Triển Khai](#12-kế-hoạch-triển-khai)
 13. [Tổng Hợp Gap Analysis](#13-tổng-hợp-gap-analysis)
 
 ---
@@ -30,138 +30,89 @@ Hệ thống kết nối người nông dân với thiết bị cảm biến và
 
 ### 1.2. Nguyên tắc thiết kế
 
-- **Offline-first:** Toàn bộ chức năng hoạt động khi không có Internet.
-- **Edge-centric:** Mọi quyết định được đưa ra tại gateway, không phụ thuộc cloud.
+- **LLM Server ≠ Edge Gateway:** LLM chạy trên server riêng (PC/cloud), edge gateway chỉ chạy agent nhẹ + MCP + recorder.
+- **Dual-mode:** Online = LLM available → chat + tool calling. Offline = LLM unreachable → data collection 24/7.
+- **Offline-first:** Thu thập dữ liệu, ghi SQLite, threshold alerts vẫn hoạt động khi mất kết nối LLM Server.
+- **Edge-centric:** Mọi quyết định vận hành được đưa ra tại gateway, không phụ thuộc cloud.
 - **MCP là lớp giao tiếp duy nhất** giữa AI và phần cứng.
 - **Safety tách biệt khỏi AI:** Guard rail không dùng LLM để quyết định an toàn.
-- **AI on-demand:** LLM chỉ khởi động khi cần, không chạy nền liên tục.
 - **Human-in-the-loop:** Lệnh điều khiển actuator luôn cần xác nhận người dùng.
 
-### 1.3. Kiến trúc 3 lớp
+### 1.3. Kiến trúc hiện tại (06/2026)
+
+> **Online mode:** LLM Server reachable → Agent chat + tool calling
+> **Offline mode:** LLM Server unreachable → Edge gateway = data collector + recorder + threshold alerts
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              NGƯỜI DÙNG                                     │
-│  ┌───────┐  ┌───────┐  ┌──────────┐  ┌──────────┐  ┌───────┐  ┌─────────┐   │
-│  │  Web  │  │  App  │  │ Telegram │  │ WA / Zalo│  │  SMS  │  │   BLE   │   │
-│  └───────┘  └───────┘  └──────────┘  └──────────┘  └───────┘  └─────────┘   │
-└──────────────────────────────────┬──────────────────────────────────────────┘
-                                   │ Chat / Voice / SMS
-                                   ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│              EDGE GATEWAY (Jetson Nano 4GB — GPU 128-core Maxwell)         │
-│  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │                        AI AGENT (on-demand)                          │  │
-│  │                                                                      │  │
-│  │  ┌─────────────────┐   ┌──────────────────┐   ┌──────────────────┐   │  │
-│  │  │  User Interface │   │  Ollama          │   │  LangChain       │   │  │
-│  │  │  (Chat / Voice) │◄──┤  Qwen2.5 1.5B    │◄──┤  + MCP Client    │   │  │
-│  │  │                 │──►│  RAM ~1.5GB      │──►│  Tool calling    │──┐│  │
-│  │  └─────────────────┘   └──────────────────┘   └──────────────────┘  ││  │
-│  │                                                                     ││  │
-│  │                                              ┌───────────────────┐  ││  │
-│  │                                              │  Safety Validator │◄─┘│  │
-│  │                                              │  Guard rails      │   │  │
-│  │                                              │  + human-in-loop  │   │  │
-│  │                                              └──────────┬────────┘   │  │
-│  │                                                         │            │  │
-│  │  ┌──────────────────────────────────────────────────────▼─────────┐  │  │
-│  │  │                     MCP GATEWAY (Jeltz)                        │  │  │
-│  │  │  • Tool definitions & routing                                  │  │  │
-│  │  │  • Adapter: Serial / MQTT / Mock                               │  │  │
-│  │  │  • MCP → LoRa Bridge (UART 115200)                             │  │  │
-│  │  └──────────────────────────┬─────────────────────────────────────┘  │  │
-│  └─────────────────────────────┼────────────────────────────────────────┘  │
-│                                │                                           │
-│  ┌─────────────────────────────▼─────────────────────────────────────────┐ │
-│  │                   JELTZ DAEMON (24/7 — ~50MB RAM)                     │ │
-│  │                                                                       │ │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌────────────────────────┐ │ │
-│  │  │  LoRa Bridge    │─►│  Background     │─►│  Rule Engine           │ │ │
-│  │  │  UART / SPI     │  │  Recorder       │  │  R01–R06: Threshold    │ │ │
-│  │  │  Read sensor    │  │  (SQLite)       │  │  R04: Stuck sensor     │ │ │
-│  │  │  Send actuator  │  │                 │  │  R05: Missing data     │ │ │
-│  │  └─────────────────┘  └─────────────────┘  │  R07: Battery low      │ │ │
-│  │                                            │  R08: Actuator timeout │ │ │
-│  │                                            └───────────┬────────────┘ │ │
-│  │                                                        │              │ │
-│  │  ┌──────────────────────────────────────────────────────▼───────────┐ │ │
-│  │  │                   ML INFERENCE ENGINE (24/7)                     │ │ │
-│  │  │                                                                  │ │ │
-│  │  │  ┌──────────────────────────┐  ┌──────────────────────────────┐  │ │ │
-│  │  │  │  UNIVARIATE AD (realtime)│  │  PREDICTIVE (mỗi 5–15 phút)  │  │ │ │
-│  │  │  │  • Moving Avg ±3σ        │  │  • Soil moisture (LightGBM)  │  │ │ │
-│  │  │  │  • Rate of Change        │  │  • Battery life (Linear Reg) │  │ │ │
-│  │  │  │  • Stuck sensor          │  │  • Temp predict              │  │ │ │
-│  │  │  │  • Seasonal deviation    │  │                              │  │ │ │
-│  │  │  │  RAM ~10MB               │  └──────────────────────────────┘  │ │ │
-│  │  │  └──────────────┬───────────┘                                    │ │ │
-│  │  │                 │            ┌────────────────────────────────┐  │ │ │
-│  │  │  ┌──────────────▼──────────┐ │  WEATHER LSTM (mỗi 15 phút)    │  │ │ │
-│  │  │  │  MULTIVARIATE AD        │ │  • Dự báo 48h                  │  │ │ │
-│  │  │  │  (khi có đủ data)       │ │  • ONNX ~8MB                   │  │ │ │
-│  │  │  │  • Isolation Forest     │ │  • NASA POWER data             │  │ │ │
-│  │  │  │  • Cross-correlation    │ │  RAM ~80MB                     │  │ │ │
-│  │  │  │  RAM ~30MB              │ └────────────────────────────────┘  │ │ │
-│  │  │  └─────────────────────────┘                                     │ │ │
-│  │  └──────────────────────────────────────────────────────────────────┘ │ │
-│  │                                                                       │ │
-│  │  ┌────────────────────────────────────────────────────────────────┐   │ │
-│  │  │                  NOTIFIER (Telegram / SMS)                     │   │ │
-│  │  │  • Rule Engine trigger  → push alert ngay                      │   │ │
-│  │  │  • ML anomaly > ngưỡng  → push + gọi AI Agent                  │   │ │
-│  │  │  • Scheduled report (sáng / tối)                               │   │ │
-│  │  └────────────────────────────────────────────────────────────────┘   │ │
-│  └───────────────────────────────────────────────────────────────────────┘ │
-│                                                                            │
-│  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │                     SQLite DATABASE (~20MB)                          │  │
-│  │  ┌─────────────┐ ┌──────────┐ ┌─────────────────┐ ┌───────────────┐  │  │
-│  │  │ sensor_data │ │ alerts   │ │ device_registry │ │ weather_      │  │  │
-│  │  │ (time-series│ │ (ML out) │ │                 │ │ forecasts     │  │  │
-│  │  └─────────────┘ └──────────┘ └─────────────────┘ └───────────────┘  │  │
-│  │  ┌─────────────┐ ┌──────────┐ ┌─────────────────┐                    │  │
-│  │  │ actuation_  │ │ ml_      │ │model_metrics    │                    │  │
-│  │  │ log         │ │ models   │ │                 │                    │  │
-│  │  └─────────────┘ └──────────┘ └─────────────────┘                    │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────┬─────────────────────────────────────────┘
-                                   │ SPI / UART 115200
-                                   │ (Jeltz gửi lệnh qua UART đến module radio)
-                                   ▼
-                            ┌──────────────────┐
-                            │   Module LoRa    │
-                            │   SX1262 HAT     │
-                            │  (radio trans-   │
-                            │   ceiver)        │
-                            └────────┬─────────┘
-                                     │ LoRa 433/868/915 MHz
-                                     │
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     LỚP MESH — ĐỒNG RUỘNG                                   │
-│                     ESP32-S3 + SX1262 — Mesh tự phục hồi                    │
-│            ┌───────────────┼────────────────┐                               │
-│            ▼               ▼                ▼                               │
-│  ┌─────────────────┐ ┌─────────────┐ ┌──────────────────┐                   │
-│  │  Sensor Node    │ │ Relay Node  │ │  Actuator Node   │                   │
-│  │  ESP32-S3       │ │ ESP32-S3    │ │  ESP32 + Relay   │                   │
-│  │  + SX1262       │ │ + SX1262    │ │  + SX1262        │                   │
-│  │─────────────────│ │─────────────│ │──────────────────│                   │
-│  │  DHT22          │ │ Chuyển tiếp │ │  Máy bơm / Van   │                   │
-│  │  Soil sensor    │ │ tín hiệu    │ │  Relay module    │                   │
-│  │  BH1750         │ │─────────────│ │──────────────────│                   │
-│  │─────────────────│ │ Năng lượng  │ │  Nguồn lưới      │                   │
-│  │  Solar + LiPo   │ │ mặt trời    │ │  / Solar         │                   │
-│  └─────────────────┘ └─────────────┘ └──────────────────┘                   │
+│                           PC (RTX 3050 — 6GB VRAM)                          │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                          Ollama                                      │   │
+│  │                     Qwen2.5 7B (Q4_K_M)                              │   │
+│  │                     Port 11434                                       │   │
+│  │                     GPU: ~40 tok/s                                   │   │
+│  └───────────────────────────────────┬──────────────────────────────────┘   │
+│                                      │ Tailscale VPN                        │
+│                                100.125.217.6                                │
+└───────────────────────────────────────┼─────────────────────────────────────┘
+                                        │
+┌───────────────────────────────────────┼─────────────────────────────────────┐
+│                           JETSON NANO (edge)                                │
+│                             100.91.80.113                                   │
+│  ┌────────────────────────────────────▼──────────────────────────────────┐  │
+│  │                     SystemManager (orchestrator)                      │  │
+│  │                                                                       │  │
+│  │  ┌─────────────────────┐    ┌──────────────────────────────────────┐  │  │
+│  │  │    AI AGENT         │    │  EventBus + EventQueueManager        │  │  │
+│  │  │  (edge-agent)       │    │  (pub/sub nội bộ, DLQ, retry)        │  │  │
+│  │  │ ┌─────────────────┐ │    └──────────────────┬───────────────────┘  │  │
+│  │  │ │ Session (REPL)  │ │                       │                      │  │
+│  │  │ │ OllamaProvider  │─┤─ (tool bridge) ───────┤                      │  │
+│  │  │ │ (→ PC via HTTP) │ │                       │                      │  │
+│  │  │ └─────────────────┘ │                       │                      │  │
+│  │  └─────────────────────┘                       │                      │  │
+│  │                                                ▼                      │  │
+│  │  ┌─────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    MCP SERVER (lowlevel.Server)                 │  │  │
+│  │  │                                                                 │  │  │
+│  │  │  ┌──────────────┐  ┌──────────────────┐  ┌──────────────────┐   │  │  │
+│  │  │  │ Fleet Tools  │  │  DeviceManager   │  │  DatabaseManager │   │  │  │
+│  │  │  │ (4 tools)    │  │  (discovery,     │  │  (write          │   │  │  │
+│  │  │  │  read-only)  │  │   catalog,       │  │   coordinator)   │   │  │  │
+│  │  │  └──────┬───────┘  │   routing, lock) │  └────────┬─────────┘   │  │  │
+│  │  │         │          └────────┬─────────┘           │             │  │  │
+│  │  │         │                   │                     │             │  │  │
+│  │  │  ┌──────┴───────────────────┴─────────────────────▼──────────┐  │  │  │
+│  │  │  │              ReadingStore (SQLite WAL)                    │  │  │  │
+│  │  │  │  1 table: readings (device_id, sensor_id, value, unit, ts)│  │  │  │
+│  │  │  └───────────────────────────────────────────────────────────┘  │  │  │
+│  │  │                                                                 │  │  │
+│  │  │  ┌───────────────────────────────────────────────────────────┐  │  │  │
+│  │  │  │  Adapters: Mock | Serial (UART) | MQTT                    │  │  │  │
+│  │  │  └───────────────────────────────────────────────────────────┘  │  │  │
+│  │  └─────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                       │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                 │  │
+│  │  │  Rule Engine │  │  Notifier    │  │  Retention   │                 │  │
+│  │  │  (8 rules)   │  │  (console,   │  │ (downsample  │                 │  │
+│  │  │  threshold/  │  │  telegram,   │  │   + purge)   │                 │  │
+│  │  │  rate/stuck) │  │  webhook)    │  └──────────────┘                 │  │
+│  │  └──────────────┘  └──────────────┘                                   │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  RAM: 4GB shared (GPU + CPU)                                                │
+│  GPU: 128-core Maxwell (Cuda 10.2)                                          │
+│  OS: Ubuntu 22.04 (JetPack R32.7.6)                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Lớp | Thành phần | Vai trò | Chạy 24/7? |
 |-----|-----------|---------|-----------|
-| Giao tiếp | Web, Telegram Bot, BLE, SMS | Nhận lệnh người dùng, trả kết quả | ✅ |
-| Edge — LLM Agent | Qwen2.5 + LangChain + Safety + MCP | Xử lý ngôn ngữ, suy luận, multi-step | ❌ On-demand |
-| Edge — ML Inference | Univariate AD + Multivariate AD + Weather LSTM | Phát hiện bất thường, dự đoán | ✅ 24/7 |
-| Edge — Daemon | Recorder + Rule Engine + ML Triggers | Thu thập data, threshold, gọi ML | ✅ 24/7 |
+| Giao tiếp | Web (port 8374), Telegram Bot, SMS | Nhận lệnh người dùng, trả kết quả | ✅ |
+| Edge — LLM Agent | Qwen2.5 + edge-agent + MCP | Xử lý ngôn ngữ, suy luận, multi-step | ❌ On-demand |
+| Edge — Daemon | MCP server + Rule Engine + Recorder | Thu thập data, threshold, retention | ✅ 24/7 |
+| Edge — Modules | SystemManager, EventBus, Notifier, DatabaseManager | Orchestration, event-driven, alerts | ✅ 24/7 |
 | Mesh Field | ESP32 Sensor / Relay / Actuator Node | Thu thập dữ liệu, thực thi lệnh | ✅ 24/7 |
 
 ---
@@ -195,20 +146,20 @@ Hệ thống kết nối người nông dân với thiết bị cảm biến và
 
 ### 3.1. Gateway software
 
-| Thành phần | Công nghệ | Vai trò | RAM | Chạy |
-|-----------|-----------|---------|-----|------|
-| LLM runtime | Ollama (Qwen2.5 1.5B/3B) | Inference local — on-demand | ~1.5 GB | On-demand |
-| AI Agent framework | LangChain + MCP Client (Python) | Tool calling, conversation management | ~100 MB | On-demand |
-| MCP Gateway | Jeltz (custom) | Tool definitions, device routing, LoRa bridge | ~50 MB | ✅ 24/7 |
-| Daemon / Rule Engine | Python process (systemd service) | 24/7 data collection, threshold alerting | ~50 MB | ✅ 24/7 |
-| **ML — Univariate AD** | **Moving Avg ±3σ + Rate of Change + Variance** | **Deviation, stuck sensor, seasonal** | **~10 MB** | **✅ 24/7** |
-| **ML — Multivariate AD** | **Isolation Forest + Cross-correlation** | **Tổ hợp sensor bất thường (M01-M04)** | **~30 MB** | **✅ 24/7** |
-| **ML — Predictive** | **LightGBM / Linear Regression** | **Dự đoán độ ẩm, nhiệt, pin** | **~50 MB** | **✅ Mỗi 5-15 phút** |
-| **ML — Weather LSTM** | **LSTM-TCN ONNX (từ NASA POWER)** | **Dự báo thời tiết local** | **~80 MB** | **✅ Mỗi 15 phút** |
-| Database | SQLite 3 + WAL mode | Time-series sensor data, alert log, device registry | ~20 MB | ✅ 24/7 |
-| Notification | Telegram Bot API / SMTP | Push alerts khi có bất thường | ~10 MB | ✅ 24/7 |
-| Web UI | Lightweight HTTP server (port 8374) | Chat interface + REST API | ~30 MB | ✅ 24/7 |
-| OS | Ubuntu 22.04 LTS (aarch64) | NVIDIA JetPack SDK, systemd | ~2 GB | ✅ 24/7 |
+| Thành phần | Công nghệ | Vai trò | RAM | Chạy ở đâu |
+|-----------|-----------|---------|-----|-----------|
+| **LLM Inference** | Ollama + Qwen2.5 7B Q4_K_M | Inference GPU (RTX 3050) | ~4.7 GB | **PC** (Tailscale) |
+| **AI Agent** | edge-agent (vendored) | Chat + tool calling, provider abstraction | ~50 MB | Jetson |
+| **MCP Server** | `mcp.server.lowlevel.Server` | Tool routing (fleet + device), stdio + HTTP | ~30 MB | Jetson |
+| **SystemManager** | `system/manager.py` | Central orchestrator: lifecycle, DI, health check | ~10 MB | Jetson |
+| **EventBus** | `event_bus/` | Pub/sub sync + async queue (DLQ, retry) | ~5 MB | Jetson |
+| **Database** | SQLite 3 + WAL mode | 1 table: `readings` (time-series) | ~20 MB | Jetson |
+| **Rule Engine** | `rule_engine/engine.py` | 8 rules: threshold, rate, stuck, missing data | ~5 MB | Jetson |
+| **Notifier** | `notifier/` | Multi-channel: console, telegram, webhook, SMS | ~10 MB | Jetson |
+| **Sensor Poller** | `sensor_poller/` | Background polling (per-device async tasks) | ~10 MB | Jetson |
+| **Web UI** | Chưa triển khai | — | — | — |
+| **OS** | Ubuntu 22.04 (Jetson) + Ubuntu 22.04 (PC) | — | — | — |
+| **VPN** | Tailscale | Kết nối Jetson ↔ PC | ~50 MB | Cả 2 máy |
 
 > **Tổng RAM khi đầy đủ:** ~280 MB (daemon + ML + DB + notification) + ~1.6 GB (LLM khi chạy). Jetson Nano 4GB còn ~2 GB trống. GPU 128-core Maxwell hỗ trợ CUDA cho ONNX Runtime (ML inference) và Ollama (LLM).
 
@@ -228,26 +179,53 @@ Hệ thống kết nối người nông dân với thiết bị cảm biến và
 
 ## 4. Luồng Dữ Liệu
 
-### 4.1. Thu thập dữ liệu cảm biến
+### 4.1. Thu thập dữ liệu cảm biến (event-driven)
 
 ```
-Sensor Node                   Gateway Daemon                  AI Agent / User
-    │                               │                               │
-    ├──[LoRa]── data packet ───────►│                               │
-    │                               ├─ parse + store SQLite         │
-    │                               ├─ Rule Engine check            │
-    │                               │   ├─ OK → tiếp tục            │
-    │                               │   └─ Vi phạm rule             │
-    │                               │       ├─ Ghi alerts table     │
-    │                               │       ├─ Push notification    │
-    │                               │       └─ Wake AI (nếu cần)    │
-    │                               │                               │
-    │                               │◄── MCP: get_sensor_history ───┤
-    │                               ├─── query SQLite ─────────────►│
-    │                               │◄── MCP: read_sensor ──────────┤
-    │◄──[LoRa]── request ───────────┤                               │
-    ├──[LoRa]── response ──────────►│                               │
-    │                               ├─── tool result ──────────────►│
+Sensor / Poller                  Gateway Modules                   AI Agent / User
+    │                               │                                 │
+    ├── tool call (serial/mqtt) ───►│                                 │
+    │                               │                                 │
+    │                        ┌──────▼────────┐                        │
+    │                        │ Sensor Poller │                        │
+    │                        │ (tự động)     │                        │
+    │                        │ hoặc MCP tool │                        │
+    │                        └──────┬────────┘                        │
+    │                               │                                 │
+    │                     publish "db_write"                          │
+    │                               │                                 │
+    │                        ┌──────▼──────────┐                      │
+    │                        │ DatabaseManager │                      │
+    │                        │ _handle_write() │                      │
+    │                        └──────┬──────────┘                      │
+    │                               │                                 │
+    │               ┌───────────────┼──────────────┐                  │
+    │               ▼               ▼              ▼                  │
+    │        ┌──────────┐   ┌────────────┐   ┌─────────┐              │
+    │        │ SQLite   │   │  EventBus  │   │ Log nếu │              │
+    │        │ (WAL)    │   │"reading_   │   │ emit    │              │
+    │        │ record() │   │ recorded"  │   │ fail    │              │
+    │        └──────────┘   └──────┬─────┘   └─────────┘              │
+    │                              │                                  │
+    │                     ┌────────┴────────┐                         │
+    │                     ▼                 ▼                         │
+    │              ┌───────────┐     ┌──────────────┐                 │
+    │              │Rule Engine│     │ Notifier     │                 │
+    │              │(8 rules)  │     │ (nếu là      │                 │
+    │              │           │     │  alert)      │                 │
+    │              └───────────┘     └──────────────┘                 │
+    │                              │                                  │
+    │                              ▼                                  │
+    │                        ┌────────────┐                           │
+    │                        │  Telegram  │                           │
+    │                        │  Console   │                           │
+    │                        │  Webhook   │                           │
+    │                        └────────────┘                           │
+    │                              │                                  │
+    │                              │◄── MCP: fleet.get_history ──── ──┤
+    │                              ├─── query SQLite direct ─────────►│
+    │                              │◄── MCP: call device tool ────────┤
+    │◄── serial/mqtt ──────────────┤── tool result ──────────────────►│
 ```
 
 ### 4.2. Điều khiển actuator
@@ -344,7 +322,7 @@ Sensor stream ──[LoRa]──► Gateway Daemon
 ### 4.5. ML Inference — Predictive + Weather (định kỳ)
 
 ```
-Jeltz Daemon (mỗi 15 phút)
+AgriMeshAI Daemon (mỗi 15 phút)
     │
     ├── [Predictive] ──► LightGBM
     │   ├── Input: sensor history 7 ngày
@@ -369,157 +347,254 @@ AI Agent gọi:
 
 ---
 
-## 5. MCP Gateway — Jeltz
+## 5. MCP Server — agrimesh
 
-### 5.1. Danh sách MCP Tools đầy đủ
+### 5.1. Tổng quan
 
-#### Nhóm Read — Đọc dữ liệu
+MCP Server là trung tâm routing tool giữa AI Agent và hệ thống (SQLite, hardware). Được xây dựng với **lowlevel.Server** (từ `mcp` Python SDK), chạy trên Jetson Nano.
 
-| MCP Tool | Tham số | Mô tả | Trạng thái |
-|----------|---------|-------|-----------|
-| `read_sensor` | `node_id, sensor_id` | Đọc 1 cảm biến realtime | ✅ Đã thiết kế |
-| `read_multiple_sensors` | `node_ids[], sensor_ids[]` | Đọc nhiều cảm biến song song | ✅ Đã thiết kế |
-| `get_sensor_history` | `node_id, sensor_id, hours, aggregation` | Lịch sử từ SQLite | ✅ Đã thiết kế |
-| `get_all_readings` | — | Đọc tất cả cảm biến hiện tại | ✅ Đã thiết kế |
-| `get_soil_conditions` | `lat, lon, depth` | Tình trạng đất tổng hợp | ✅ Đã thiết kế |
-| `get_node_status` | `node_id` | Pin, RSSI, uptime, lỗi firmware | ⚠️ Cần bổ sung |
-| `get_system_summary` | — | Tóm tắt toàn bộ hệ thống cho AI report | ⚠️ Cần bổ sung |
+- **Framework:** `mcp.server.lowlevel.Server`
+- **Transport:** stdio (cho Agent) + Streamable HTTP (cho Web UI / MCP clients)
+- **Entry point:** `python main.py agent` (stdio) / `python main.py daemon` (HTTP)
+- **File:** `mcp_server/server.py` (319 dòng) + `mcp_server/fleet.py` (248 dòng)
+- **Dependency injection:** Nhận `SystemManager` qua constructor — không tự khởi tạo module nào
 
-#### Nhóm Control — Điều khiển
+### 5.2. Kiến trúc
 
-| MCP Tool | Tham số | Mô tả | Trạng thái |
-|----------|---------|-------|-----------|
-| `execute_actuator` | `node_id, actuator_id, command, params` | Gửi lệnh điều khiển (có safety check) | ✅ Đã thiết kế |
-| `emergency_stop_all` | `reason` | Dừng khẩn cấp toàn bộ — broadcast | ✅ Đã thiết kế |
-| `set_threshold` | `node_id, sensor_id, min, max` | Đặt ngưỡng cảnh báo | ✅ Đã thiết kế |
-| `schedule_actuator` | `node_id, actuator_id, cron_expr, duration` | Hẹn giờ bật/tắt định kỳ | ⚠️ Cần bổ sung |
-| `cancel_schedule` | `schedule_id` | Hủy lịch đã đặt | ⚠️ Cần bổ sung |
-| `list_schedules` | `node_id?` | Xem danh sách lịch tưới hiện tại | ⚠️ Cần bổ sung |
+```
+SystemManager (injected via DI)
+    │
+    ├── device_manager: DeviceManager (discovery, catalog, routing, locks)
+    ├── store: ReadingStore (SQLite)
+    ├── fleet: FleetTools
+    ├── rule_engine: RuleEngine
+    ├── notifier: NotifierManager
+    ├── event_bus / event_queue: EventBus + EventQueueManager
+    └── database_manager: DatabaseManager (write coordinator)
+    │
+    ▼
+AgriMeshAIServer (mcp_server/server.py)
+    │
+    ├── handle_list_tools()
+    │   └── system.list_tools() → device_manager.tools + fleet.tools
+    │
+    ├── handle_call_tool(name, arguments)
+    │   ├── fleet.* → system.call_tool() → FleetTools
+    │   │   ├── list_devices       → DeviceManager
+    │   │   ├── get_all_readings   → ReadingStore
+    │   │   ├── get_history        → ReadingStore
+    │   │   └── search_anomalies   → ReadingStore
+    │   │
+    │   └── còn lại → system.call_tool() → DeviceManager
+    │       ├── {device}.{tool} → adapter.send(command)
+    │       └── adapter.receive() → return value
+    │
+    ├── serve_stdio()    → agent mode
+    └── serve_http()     → daemon mode (Streamable HTTP, port 8374, endpoint /mcp)
+```
 
-#### Nhóm Network — Quản lý mạng
+### 5.3. Database Schema
 
-| MCP Tool | Tham số | Mô tả | Trạng thái |
-|----------|---------|-------|-----------|
-| `get_device_topology` | — | Bản đồ mạng mesh (nodes, links, stats) | ✅ Đã thiết kế |
-| `ping_node` | `node_id` | Kiểm tra node còn sống, đo RTT + RSSI | ✅ Đã thiết kế |
-| `list_devices` | — | Danh sách thiết bị từ registry | ✅ Đã thiết kế |
-| `register_device` | `node_id, type, sensors[], location` | Đăng ký node mới vào registry | ⚠️ Cần bổ sung |
-| `decommission_device` | `node_id` | Xóa node khỏi hệ thống | ⚠️ Cần bổ sung |
+Tất cả dữ liệu được lưu trong `data/agrimesh.db` (SQLite WAL mode). Schema hiện tại chỉ có **1 bảng**:
 
-#### Nhóm Analysis — Phân tích AI
-
-| MCP Tool | Tham số | Mô tả | Trạng thái |
-|----------|---------|-------|-----------|
-| `check_irrigation_plan` | `fields[], hours` | Phân tích nhu cầu tưới | ✅ Đã thiết kế |
-| `search_anomalies` | `hours, device_id?` | Phát hiện bất thường từ alert log | ✅ Đã thiết kế |
-| `get_weather_forecast` | `lat, lon, days` | Dự báo thời tiết (Internet, offline fallback) | ✅ Đã thiết kế |
-| `get_weather_forecast_local` | `hours` | Dự báo LSTM-TCN local (NASA POWER) | ✅ Thêm mới |
-| `predict_soil_moisture` | `node_id, hours_ahead` | Dự đoán độ ẩm đất (LightGBM) | ✅ Thêm mới |
-| `predict_battery_life` | `node_id` | Dự đoán pin còn lại (Linear Regression) | ✅ Thêm mới |
-| `generate_daily_report` | `date?` | Báo cáo ngày: tưới, cảm biến, alert | ⚠️ Cần bổ sung |
-| `compare_trend` | `node_id, sensor_id, days` | So sánh xu hướng tuần này vs tuần trước | ⚠️ Cần bổ sung |
-
-### 5.2. LoRa Bridge Adapter
-
-LoRa Bridge là MCP adapter triển khai interface `BaseAdapter`, giao tiếp với LoRa module qua UART 115200 baud theo binary protocol (xem mục 10.2).
-
-> ⚠️ **GAP G02 — SerialQueue:** Cần thêm FIFO queue cho UART, per-command timeout 3s, retry 3 lần trước khi trả lỗi cho MCP layer.
-
----
-
-## 6. Database Schema (SQLite)
-
-Tất cả dữ liệu lưu trong một file duy nhất tại `/var/jeltz/data.db`. **WAL mode bật mặc định** để tránh lock contention giữa daemon (writer) và AI agent (reader).
-
-### 6.1. Bảng `readings` — Dữ liệu cảm biến
+#### readings — Dữ liệu cảm biến time-series
 
 ```sql
-CREATE TABLE readings (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id     INTEGER NOT NULL,
+CREATE TABLE IF NOT EXISTS readings (
+    timestamp   REAL    NOT NULL,  -- epoch seconds (float)
+    device_id   TEXT    NOT NULL,
     sensor_id   TEXT    NOT NULL,
     value       REAL    NOT NULL,
     unit        TEXT    NOT NULL,
-    timestamp   INTEGER NOT NULL,  -- Unix timestamp (giây)
-    quality     INTEGER DEFAULT 100  -- Chất lượng tín hiệu 0–100 (từ RSSI)
+    downsampled INTEGER NOT NULL DEFAULT 0  -- 0=raw, 1=hourly avg
 );
 
-CREATE INDEX idx_readings_lookup
-    ON readings (node_id, sensor_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_readings_device_sensor_time
+    ON readings (device_id, sensor_id, timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_readings_downsampled
+    ON readings (downsampled, timestamp);
 ```
 
-- **Retention policy:** 30 ngày full resolution; downsampled 1h/lần giữ 1 năm.
-- Cleanup job chạy khi gateway start và mỗi đêm lúc 2h.
+Không có bảng `alerts`, `devices`, `actuation_log` riêng — device registry đọc từ TOML profiles, alert qua EventBus, actuation chưa có log.
 
-### 6.2. Bảng `alerts` — Cảnh báo
+### 5.4. Retention Policy
 
-```sql
-CREATE TABLE alerts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id     INTEGER NOT NULL,
-    sensor_id   TEXT,               -- NULL nếu là alert hệ thống (node offline)
-    rule_id     TEXT    NOT NULL,   -- Tên rule vi phạm (R01, R02, ...)
-    value       REAL,
-    severity    TEXT    NOT NULL,   -- INFO / WARNING / CRITICAL
-    message     TEXT    NOT NULL,
-    timestamp   INTEGER NOT NULL,
-    ack_at      INTEGER,            -- NULL nếu chưa xác nhận
-    ack_by      TEXT                -- 'user' / 'system' / user_id
-);
+Dữ liệu cũ được dọn qua `database_manager/retention.py`:
+
+| Khoảng thời gian | Độ chi tiết | downsampled flag |
+|------------------|-------------|------------------|
+| 0-30 ngày | Raw | `0` |
+| 30 ngày - 1 năm | Hourly average | `1` |
+| > 1 năm | Xóa | — |
+
+Chạy mỗi 6 giờ trong daemon loop qua `run_cleanup(store, full_res_days=30, keep_downsampled_days=365)`.
+
+### 5.5. Device Discovery
+
+Thiết bị được định nghĩa qua file TOML trong `device_manager/device_profiles/`:
+
+```toml
+[device]
+name = "farm_sensor"
+description = "Mock soil moisture & temperature sensor"
+
+[connection]
+protocol = "mock"         # mock | serial | mqtt
+
+[connection.mock_responses]
+READ = "25.3"
+PING = "PONG"
+
+[[tools]]
+name = "get_moisture"
+description = "Get current soil moisture"
+command = "READ"
+[tools.returns]
+type = "float"
+unit = "percent"
+
+[recording]
+enabled = true
+poll_interval_ms = 5000
 ```
 
-> ⚠️ **GAP G03:** v1.0 thiếu `ack_at` / `ack_by`. Không có acknowledgment, cùng một alert bị push notification nhiều lần và AI sẽ báo lại lỗi cũ đã xử lý.
-
-### 6.3. Bảng `devices` — Device Registry
-
-```sql
-CREATE TABLE devices (
-    node_id      INTEGER PRIMARY KEY,
-    type         TEXT    NOT NULL,  -- sensor / relay / actuator
-    name         TEXT    NOT NULL,  -- Tên thân thiện (ví dụ: pump_zone_A)
-    location     TEXT,              -- Mô tả vị trí
-    sensors      TEXT,              -- JSON array tên sensor hỗ trợ
-    config       TEXT,              -- JSON config (thresholds, intervals)
-    firmware_ver TEXT,
-    status       TEXT DEFAULT 'unknown',  -- online / offline / warning / unknown
-    last_seen    INTEGER,           -- Unix timestamp lần cuối nhận gói tin
-    battery_pct  INTEGER            -- % pin; NULL nếu dùng lưới điện
-);
+Discovery flow (qua `device_manager/`):
+```
+profiles/**/*.toml → profile_parser.py → DeviceModel (Pydantic)
+                       → tool_builder.py → MCP Tool[] (namespaced: device.tool)
+                       → discovery.py → DiscoveredDevice + Adapter
+                       → catalog.py → DeviceCatalog (tools, routes, devices, locks)
 ```
 
-### 6.4. Bảng `schedules` — Lịch tưới tự động
+### 5.6. DeviceManager (thay thế Aggregator cũ)
 
-```sql
-CREATE TABLE schedules (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id      INTEGER NOT NULL,
-    actuator_id  TEXT    NOT NULL,
-    cron_expr    TEXT    NOT NULL,  -- Ví dụ: "0 6 * * *" = 6h sáng mỗi ngày
-    duration_sec INTEGER NOT NULL,
-    enabled      INTEGER DEFAULT 1,  -- 1 = bật, 0 = tắt
-    created_by   TEXT,               -- 'user' / 'ai'
-    last_run     INTEGER             -- Unix timestamp lần chạy gần nhất
-);
+DeviceManager consolidate device lifecycle, catalog building, connection lifecycle, tool routing, và health checks:
+
+```python
+class DeviceManager:
+    async def connect_all() -> dict[str, AdapterResult]
+    async def disconnect_all() -> dict[str, AdapterResult]
+    async def call_tool(namespaced_name, arguments) -> AdapterResult
+    async def health_check_all() -> dict[str, AdapterResult]
+
+    # Per-device asyncio.Lock để tránh interleaved send/receive
+    # Tool namespace: {device_name}.{tool_name} (vd: "farm_sensor.get_temperature")
 ```
 
-> ⚠️ **GAP G04:** Đây là GAP lớn trong v1.0 — chức năng hẹn giờ được đề cập nhưng không có schema lưu trữ hay logic xử lý. Cần thêm `SchedulerService` trong daemon, chạy check mỗi phút, thực thi lệnh đến hạn qua `execute_actuator` với safety check đầy đủ.
+### 5.7. Adapters
 
-### 6.5. Bảng `actuation_log` — Lịch sử điều khiển
+| Adapter | Protocol | Khi nào dùng |
+|---------|----------|-------------|
+| **MockAdapter** | In-memory | Testing, development |
+| **SerialAdapter** | UART (pyserial-asyncio) | ESP32, Arduino qua USB/UART |
+| **MQTTAdapter** | MQTT (paho-mqtt) | WiFi devices (Pico W, ESP32) |
 
-```sql
-CREATE TABLE actuation_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    node_id      INTEGER NOT NULL,
-    actuator_id  TEXT    NOT NULL,
-    command      TEXT    NOT NULL,  -- ON / OFF / SET_VALUE
-    params       TEXT,              -- JSON params bổ sung
-    duration_sec INTEGER,
-    triggered_by TEXT    NOT NULL,  -- user / schedule / ai_agent / rule_engine
-    confirmed_by TEXT,              -- User ID xác nhận; NULL nếu auto
-    status       TEXT    NOT NULL,  -- success / failed / timeout
-    timestamp    INTEGER NOT NULL
-);
+Base interface (tại `utils/adapters/base.py`):
+```python
+class BaseAdapter:
+    async connect() -> AdapterResult
+    async disconnect() -> AdapterResult
+    async send(data) -> AdapterResult
+    async receive(length?, timeout?) -> AdapterResult
+    async health_check() -> AdapterResult
 ```
+
+### 5.8. Entry point — main.py
+
+| Command | Transport | Background tasks | Use case |
+|---------|-----------|-----------------|----------|
+| `python main.py agent` | In-process tool bridge (không MCP transport) | ❌ | AI Agent interactive REPL |
+| `python main.py daemon` | Streamable HTTP :8374 | retention + missing_data | Production 24/7 |
+| `python main.py status` | — | — | Kiểm tra hệ thống |
+
+### 5.9. MCP Tools Đầy Đủ
+
+#### Nhóm Fleet — Truy vấn dữ liệu tổng hợp
+
+| MCP Tool | Parameters | Mô tả | Data Source |
+|----------|-----------|-------|-------------|
+| `fleet.list_devices` | None | Danh sách thiết bị + trạng thái | DeviceManager |
+| `fleet.get_all_readings` | None | Dữ liệu cảm biến mới nhất (tất cả) | ReadingStore |
+| `fleet.get_history` | `device_id, sensor_id, hours?, limit?` | Lịch sử dữ liệu | ReadingStore |
+| `fleet.search_anomalies` | `threshold_sigma?, baseline_days?` | Phát hiện bất thường (statistical) | ReadingStore |
+
+#### Nhóm Device — Điều khiển thiết bị
+
+Các tool được sinh tự động từ TOML profiles, namespace theo `{device_name}.{tool_name}`:
+- `farm_sensor.get_moisture` → command "READ" → float
+- `farm_sensor.get_temperature` → command "READ" → float
+- `mqtt_sensor.get_temperature` → command "READ_TEMP" → float
+- `serial_sensor.get_humidity` → command "READ_HUMID" → float
+- V.v. (tùy theo profile định nghĩa)
+
+---
+
+## 6. AI Agent
+
+### 6.1. Tổng quan
+
+AI Agent là lớp giao tiếp với người dùng, chạy trên Jetson Nano. Agent sử dụng **edge-agent framework** (vendored, Python thuần, không dependencies ngoài) để kết nối LLM (trên PC) và MCP tools (in-process).
+
+- **Framework:** edge-agent (`agent/src/`, 14 files)
+- **LLM Provider:** OllamaProvider qua Tailscale → PC (Qwen2.5 7B), dùng `urllib` stdlib (không cần openai-python)
+- **Tool bridge:** In-process — tools được bridge từ SystemManager thành `Agent.Tool` objects, **không qua MCP transport**, không subprocess
+- **Giao diện:** Interactive REPL (Session) trong `main.py`
+- **Entry point:** `python main.py agent`
+- **Agent types hỗ trợ:** agent, guardrail, router, evaluator, fallback
+
+### 6.2. Luồng hoạt động
+
+```
+1. main.py: SystemManager.start() → tools list
+2. _build_tool_bridge() → chuyển MCP Tool[] thành Agent.Tool[]
+3. Agent(system_instructions, tools, provider)
+4. Session.start() → REPL loop
+5. User nhập query → Agent.run() → LLM (Ollama API)
+6. LLM trả về tool_calls → _execute_tool() (gọi trực tiếp SystemManager, không qua MCP)
+7. Kết quả gửi lại LLM → LLM trả lời tiếng Việt
+```
+
+### 6.3. Caching & Memory
+
+edge-agent sử dụng message-based memory:
+- Tất cả messages (system, user, assistant, tool_result) được lưu trong list
+- Session giữ history qua các turn
+- `max_turns = 10` giới hạn số lần tool call loop
+- Không có persistent memory (sẽ lose sau khi thoát)
+
+### 6.4. Tools
+
+Agent có quyền truy cập N tools (số lượng tùy theo TOML profiles + fleet tools):
+
+| Tool | Mô tả |
+|------|-------|
+| `fleet.list_devices` | Liệt kê thiết bị + trạng thái |
+| `fleet.get_all_readings` | Dữ liệu cảm biến mới nhất từ SQLite |
+| `fleet.get_history` | Lịch sử dữ liệu (device_id, sensor_id, hours, limit) |
+| `fleet.search_anomalies` | Phát hiện bất thường ±σ |
+| `{device}.{tool}` | Tool thiết bị (vd: `farm_sensor.get_temperature`) |
+
+### 6.5. Offline Behavior
+
+Khi LLM Server không reachable (Jetson mất kết nối Tailscale/Internet), edge gateway vẫn hoạt động:
+
+| Thành phần | Online | Offline |
+|-----------|--------|---------|
+| AI Agent | ✅ Chat + tool calling | ❌ Báo lỗi kết nối |
+| MCP Server (daemon) | ✅ Tool routing + HTTP | ✅ Vẫn chạy |
+| Background recorder | ✅ Poll sensors | ✅ Poll sensors |
+| SQLite ghi dữ liệu | ✅ | ✅ |
+| Rule Engine | ✅ Threshold alerts | ✅ Threshold alerts |
+| Notifier | ✅ Push notification | ✅ Push notification |
+
+### 6.6. Lưu ý
+
+- **Query bằng English** — Qwen2.5 tool calling ổn định hơn với English
+- **Trả lời bằng tiếng Việt** — `instructions.txt` yêu cầu "Reply in Vietnamese ONLY"
+- **Thoát:** `exit` hoặc `quit`
+- **Temperature:** 0.01 (deterministic) — có thể cấu hình trong `config/models.yaml`
+- **Tool bridge in-process:** tools gọi trực tiếp `SystemManager.call_tool()` — không có overhead MTP transport
 
 ---
 
@@ -577,45 +652,53 @@ Tính năng rủi ro cao — firmware bị brick giữa đồng ruộng không t
 
 ## 8. Phát Hiện Bất Thường — Rule Engine
 
-### 8.1. Kiến trúc 3 tầng
+### 8.1. Kiến trúc (Event-driven)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    24/7 (luôn chạy)                          │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌────────────┐  │
-│  │ LoRa Receiver    │  │ SQLite Recorder  │  │Rule Engine │  │
-│  │ (đọc gói tin)    │  │ (ghi dữ liệu)    │  │(so ngưỡng) │  │
-│  └──────────────────┘  └──────────────────┘  └────────────┘  │
-│  RAM: ~50MB, CPU: ~5%                                        │
-├──────────────────────────────────────────────────────────────┤
-│               THEO YÊU CẦU (on-demand)                       │
-│  ┌──────────────────────┐  ┌──────────────────────────────┐  │
-│  │ Push Notification    │  │ AI Agent (LLM)               │  │
-│  │ + Scheduled report   │  │ RAM: ~1.5GB, CPU: 30–50%     │  │
-│  └──────────────────────┘  │ Chạy 5–30s rồi tắt           │  │
-│                            └──────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
+Sensor Reading (từ recorder hoặc tool call)
+    │
+    ▼
+EventQueueManager → DatabaseManager → SQLite
+    │
+    ▼
+EventBus.emit("reading_recorded")
+    │
+    ▼
+Rule Engine (8 rules, 5-min cooldown)
+    │
+    ▼
+EventBus.emit("alert_triggered")
+    │
+    ▼
+NotifierManager (console, telegram, webhook)
+    │
+    ▼
+Push notification → người dùng
 ```
 
-### 8.2. Danh sách rules đầy đủ
+### 8.2. Danh sách rules đã triển khai
 
-| Rule ID | Loại | Điều kiện | Hành động | Trạng thái |
-|---------|------|-----------|-----------|-----------|
-| R01 | Threshold đơn | `value > max` hoặc `value < min` | Alert CRITICAL + push notification | ✅ |
-| R02 | Threshold kép | `value > warning_level` trong T phút | Alert WARNING + gọi AI | ✅ |
-| R03 | Rate of change | `\|Δvalue/Δt\| > threshold` | Alert WARNING + gọi AI | ✅ |
-| R04 | Stuck sensor | Giá trị không đổi > 6h | Alert WARNING: cảm biến hỏng? | ✅ |
-| R05 | Missing data | Không có reading > threshold_time | Alert CRITICAL: node mất kết nối | ✅ |
-| R06 | Baseline deviation | Lệch > X% so với trung bình 7 ngày | Alert INFO + gọi AI | ✅ |
-| R07 | Battery low | `battery_pct < 20%` | Alert WARNING: sắp hết pin | ⚠️ Thêm mới |
-| R08 | Actuator overtime | Actuator vẫn ON sau `duration + 5 phút` | Emergency stop + Alert CRITICAL | ⚠️ Thêm mới |
-| R09 | Correlation anomaly | 2 sensor liên quan tăng/giảm cùng lúc | Gọi AI phân tích root cause | ⚠️ Thêm mới |
+| Rule ID | Loại | Sensor | Điều kiện | Severity |
+|---------|------|--------|-----------|----------|
+| R01 | Threshold | temperature | `> 40°C` | CRITICAL |
+| R02 | Threshold | temperature | `< 5°C` | CRITICAL |
+| R03 | Threshold | moisture | `< 20%` (khô) | WARNING |
+| R04 | Threshold | moisture | `> 80%` (ngập) | WARNING |
+| R05 | Threshold | battery | `< 20%` | WARNING |
+| R06 | Threshold | humidity | `> 90%` (nấm mốc) | WARNING |
+| R07 | Threshold | humidity | `< 30%` (khô) | WARNING |
+| R08 | Rate of change | temperature | `> 5°C/h` | WARNING |
+| R09 | Missing data | — | No data > 1h | WARNING |
 
-> ⚠️ **GAP G10:** Rules R07, R08, R09 chưa có trong v1.0. R08 đặc biệt quan trọng — actuator chạy quá giờ mà không tự tắt là rủi ro thực tế.
+Rules được định nghĩa trong `config/rules.yaml`, có thể hot-reload. Alert deduplication qua cooldown 5 phút.
+
+> **Lưu ý:** Rules R07-R09 trong doc cũ (baseline deviation, actuator overtime, correlation anomaly) chưa triển khai. R09 ở đây là missing data check (chạy timer-based trong daemon loop).
 
 ---
 
 ## 9. Machine Learning
+
+> ⚠️ **Hiện trạng:** Các ML models dưới đây là thiết kế mục tiêu. Codebase hiện tại mới chỉ có statistical anomaly detection (baseline deviation ±σ qua SQLite) trong `ReadingStore.search_anomalies()`. LightGBM, LSTM-TCN, ONNX chưa được tích hợp.
 
 > 📖 **Tài liệu chi tiết từng tác vụ ML được mô tả trong thư mục `docs/machine_learning/`:**
 > - [`01-anomaly-detection.md`](machine_learning/01-anomaly-detection.md) — Univariate + Multivariate Anomaly Detection
@@ -855,8 +938,8 @@ NASA POWER (5-10 năm)
                         │ export ONNX + quantize
                         ▼
               ┌────────────────────┐
-              │ Deploy xuống        │
-              │ gateway (Jetson Nano)    │
+              │ Deploy xuống       │
+              │ gateway            │
               │ ONNX Runtime       │
               └─────────┬──────────┘
                         │
@@ -865,11 +948,11 @@ NASA POWER (5-10 năm)
           ▼                           ▼
   ┌─────────────────┐    ┌──────────────────────┐
   │ Mới deploy      │    │ Có sensor data > 3   │
-  │ Chỉ dùng NASA   │    │ tháng                 │
-  │ Dự báo ±3°C     │    │ Fine-tune với data    │
-  │                 │    │ thực tế tại ruộng      │
-  │ get_weather_     │    │ Dự báo ±1°C           │
-  │ forecast_local()│    │                       │
+  │ Chỉ dùng NASA   │    │ tháng                │
+  │ Dự báo ±3°C     │    │ Fine-tune với data   │
+  │                 │    │ thực tế tại ruộng    │
+  │ get_weather_    │    │ Dự báo ±1°C          │
+  │ forecast_local()│    │                      │
   └─────────────────┘    └──────────────────────┘
 ```
 
@@ -941,7 +1024,6 @@ AI Agent gọi tool này thay vì Open-Meteo API, ưu tiên dự báo local.
 │             ┌────┴────┐                                     │
 │             │  MCP    │                                     │
 │             │ Gateway │                                     │
-│             │ (Jeltz) │                                     │
 │             └─────────┘                                     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -972,34 +1054,52 @@ pip install lightgbm prophet
 
 ## 10. Kết Nối Người Dùng
 
-### 9.1. Các kênh giao tiếp
+### 10.1. Notifier Module (đã triển khai)
 
-| Kênh | Phạm vi | Cần Internet? | Multi-user? | Push notification? | Khi nào dùng |
-|------|---------|--------------|-------------|-------------------|-------------|
-| WiFi AP (gateway tạo hotspot) | ~50m | Không | Không | Không | POC, thử nghiệm tại chỗ |
-| Local WiFi (router nhà/trại) | ~100m | Không | Có | Không | Gia đình, trại nhỏ có WiFi |
-| **4G USB + Telegram Bot** | **Bất kỳ** | **Có** | **Có** | **Có ✅** | **Triển khai thực tế — khuyến nghị** |
-| Bluetooth BLE + App | ~10m | Không | Không | Không | Kiểm tra nhanh tại gateway |
-| SMS (SIM800) | Sóng GSM | Không | Không | Có (giới hạn) | Vùng sâu không có 4G |
+Alert được gửi qua `notifier/` module, subscribe `alert_triggered` event từ EventBus:
 
-M��i kênh đều đi qua cùng một MCP Server — không có logic riêng biệt cho từng kênh.
+| Channel | File | Giao thức | Trạng thái |
+|---------|------|-----------|-----------|
+| **Console** | `notifier/console.py` | stderr với severity coloring | ✅ Luôn bật |
+| **Telegram** | `notifier/telegram.py` | HTTP Bot API (httpx) | ✅ Config qua env var |
+| **Webhook** | `notifier/webhook.py` | HTTP POST JSON | ✅ URL + headers tùy chỉnh |
+| **SMS** | `notifier/sms.py` | AT commands qua serial (SIM800/SIM7600) | ✅ Cần pyserial-asyncio |
 
-### 9.2. Conversation design — Intent mapping
+Cấu hình trong `config/notifiers.yaml`:
+
+```yaml
+notifiers:
+  console:
+    enabled: true
+  telegram:
+    enabled: false
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+  webhook:
+    enabled: false
+    url: "https://hooks.example.com/agrimesh"
+  sms:
+    enabled: false
+    port: "/dev/ttyUSB2"
+    baud_rate: 115200
+    to: "+84901234567"
+```
+
+### 10.2. Web UI
+
+Chưa triển khai. MCP server có sẵn HTTP endpoint (`/mcp` port 8374, Streamable HTTP) để Web UI tương lai kết nối.
+
+### 10.3. Conversation Design — Intent mapping
 
 | Intent | Ví dụ câu | MCP tools gọi | Cần xác nhận? |
 |--------|-----------|--------------|--------------|
-| Đọc cảm biến | "Độ ẩm khu A?" | `read_sensor` / `get_all_readings` | Không |
-| Xem lịch sử | "Tuần này mưa nhiều không?" | `get_sensor_history` | Không |
-| Hỏi thời tiết | "Có cần tưới hôm nay không?" | `get_weather_forecast` + `get_sensor_history` | Không |
-| Điều khiển ngay | "Tưới khu A 20 phút" | safety_check → `execute_actuator` | **Có ✅** |
-| Đặt lịch | "Mỗi sáng 6h tưới khu B 15 phút" | `schedule_actuator` | **Có ✅** |
-| Xem lịch | "Lịch tưới hiện tại?" | `list_schedules` | Không |
-| Hỏi bất thường | "Có gì lạ không?" | `search_anomalies` + `get_sensor_history` | Không |
-| Báo cáo | "Hôm nay tưới bao nhiêu?" | `generate_daily_report` | Không |
-| Kiểm tra node | "Node khu C còn sống không?" | `ping_node` + `get_node_status` | Không |
-| Dừng khẩn cấp | "Dừng tất cả!" | `emergency_stop_all` | **Có ✅** |
+| Đọc cảm biến | "Độ ẩm khu A?" | `fleet.get_all_readings` / `{device}.{tool}` | Không |
+| Xem lịch sử | "Tuần này mưa nhiều không?" | `fleet.get_history` | Không |
+| Hỏi bất thường | "Có gì lạ không?" | `fleet.search_anomalies` + `get_history` | Không |
+| Danh sách thiết bị | "Có node nào đang online?" | `fleet.list_devices` | Không |
+| Điều khiển | "Tưới khu A 20 phút" | tool device → actuator | **Có ✅** |
 
-### 9.3. Conversation State Management
+### 10.4. Conversation State Management
 
 ```
 chat_id: "telegram_123456"
@@ -1014,9 +1114,11 @@ chat_id: "telegram_123456"
 
 ---
 
-## 10. Giao Thức LoRa Mesh
+## 11. Giao Thức LoRa Mesh
 
-### 10.1. Cấu trúc gói tin mesh
+> ⚠️ **Hiện trạng:** Các protocol và packet format dưới đây là thiết kế mục tiêu cho ESP32 firmware. Codebase hiện tại chưa có firmware ESP32 — chỉ có gateway adapter (SerialAdapter) để giao tiếp với LoRa module qua UART.
+
+### 11.1. Cấu trúc gói tin mesh
 
 ```
 ┌──────┬──────┬──────┬───────┬─────┬─────┬───────────┬────────┐
@@ -1033,7 +1135,7 @@ chat_id: "telegram_123456"
 
 **Dest = 0xFFFF** → Broadcast toàn mạng.
 
-### 10.2. UART Binary Protocol (Gateway ↔ LoRa Module)
+### 11.2. UART Binary Protocol (Gateway ↔ LoRa Module)
 
 ```
 ┌────────────┬──────────┬─────────┬──────────────┬───────────┐
@@ -1058,7 +1160,7 @@ chat_id: "telegram_123456"
 | `0x20` | `OTA_CHUNK` | Gateway → Module | Chunk firmware OTA |
 | `0xFF` | `ERROR` | Module → Gateway | Lỗi hệ thống |
 
-### 10.3. Payload formats
+### 11.3. Payload formats
 
 **Sensor Data** (Node → Gateway):
 ```
@@ -1084,7 +1186,7 @@ chat_id: "telegram_123456"
 └─────────┴──────┴────────┴────────┴───────┘
 ```
 
-### 10.4. Mesh Routing
+### 11.4. Mesh Routing
 
 - **Giao thức:** Distance-vector routing (LoRaMesher)
 - **TDMA:** Node được cấp slot thời gian để gửi, tránh collision
@@ -1094,73 +1196,78 @@ chat_id: "telegram_123456"
 
 ---
 
-## 11. Kế Hoạch Triển Khai (POC)
+## 12. Kế Hoạch Triển Khai
 
-### 11.1. Yêu cầu môi trường
+### 12.1. Yêu cầu
 
-| Yêu cầu | Giá trị | Ghi chú |
-|---------|---------|---------|
-| OS | Ubuntu 22.04 (JetPack 6.0+) | NVIDIA SDK hỗ trợ CUDA, TensorRT |
-| Python | 3.11+ | |
-| Ollama | Latest stable | Tải model Qwen2.5 1.5B (~1GB) |
-| SQLite | 3.40+ | Tích hợp sẵn trong Python stdlib |
-| Disk space | ≥ 8GB free | LLM model + data retention |
-| RAM | ≥ 4GB | 2GB cho LLM khi chạy + 50MB daemon |
+| Yêu cầu | PC | Jetson Nano |
+|---------|-----|-------------|
+| **OS** | Ubuntu 22.04 | JetPack R32.7.6 (Ubuntu 22.04) |
+| **GPU** | RTX 3050 (6GB VRAM) | Maxwell 128-core (CUDA 10.2) |
+| **RAM** | 16GB | 4GB |
+| **Storage** | — | 22GB free |
+| **Python** | 3.10+ | 3.10 |
+| **Ollama** | ✅ Cần | ❌ Không cần |
+| **Tailscale** | ✅ Cần | ✅ Cần |
 
-### 11.2. Thứ tự phát triển
+### 12.2. Modules đã hoàn thành
 
-| Phase | Thành phần | Mô tả | Blockers |
-|-------|-----------|-------|---------|
-| **Phase 1** | Daemon + Rule Engine | Thu thập dữ liệu 24/7, alert cơ bản | Cần firmware ESP32 |
-| **Phase 1** | SQLite schema đầy đủ | Tất cả 5 bảng trong mục 6 | — |
-| **Phase 1** | UART Bridge + SerialQueue | Giao tiếp gateway ↔ LoRa module | Cần phần cứng SX1262 |
-| **Phase 2** | MCP Tools nhóm Read | `read_sensor`, `get_sensor_history`, ... | Phase 1 hoàn thành |
-| **Phase 2** | AI Agent cơ bản | Chat, đọc cảm biến, phân tích | Ollama + LangChain |
-| **Phase 2** | ConversationSession | Context management cho confirmation | AI Agent |
-| **Phase 2** | ML — Univariate AD | Moving Avg ±3σ, stuck sensor, rate of change | Có data > 1 tuần |
-| **Phase 3** | MCP Tools nhóm Control | `execute_actuator` + safety validator + ActuatorLock | Phase 2 xong |
-| **Phase 3** | SchedulerService | Lịch tưới tự động | MCP Control |
-| **Phase 3** | Telegram Bot | Remote access + push notification | 4G dongle |
-| **Phase 3** | ML — Predictive (LightGBM) | Dự đoán độ ẩm, nhiệt, pin | Có data > 30 ngày |
-| **Phase 3** | ML — Multivariate AD | Isolation Forest, cross-correlation | Có data > 2 tháng |
-| **Phase 4** | ML — Weather LSTM | LSTM-TCN từ NASA POWER, ONNX deploy | Có data sensor > 30 ngày |
-| **Phase 4** | OTA firmware | Cập nhật firmware qua LoRa | Phase 1–3 ổn định |
+| Module | Công nghệ | Trạng thái | Ghi chú |
+|--------|-----------|-----------|---------|
+| SystemManager | `system/manager.py` | ✅ | Central orchestrator + DI + health check |
+| EventBus | `event_bus/` | ✅ | Pub/sub sync + async queue + DLQ + retry |
+| DeviceManager | `device_manager/` | ✅ | Discovery, catalog, routing, per-device lock |
+| MCP Server | `mcp_server/` | ✅ | stdio + Streamable HTTP, fleet tools |
+| AI Agent | `agent/src/` | ✅ | edge-agent, OllamaProvider, Session REPL |
+| ReadingStore | `database_manager/` | ✅ | SQLite WAL, time-series, batch write, anomaly search |
+| DatabaseManager | `database_manager/` | ✅ | Write coordinator, db_write subscriber |
+| Retention | `database_manager/` | ✅ | Downsample + purge, 6h cycle |
+| Sensor Poller | `sensor_poller/` | ✅ | Per-device async polling, jitter |
+| Rule Engine | `rule_engine/` | ✅ | 8 rules (threshold, rate, stuck), 5-min cooldown |
+| Notifier | `notifier/` | ✅ | Console, Telegram, Webhook, SMS |
+| Adapters | `utils/adapters/` | ✅ | Mock, Serial, MQTT |
+| TOML Profiles | `device_manager/device_profiles/` | ✅ | Templates + examples |
+| Tailscale Split | — | ✅ | LLM trên PC, Agent trên Jetson |
 
----
+### 12.3. Chưa triển khai
 
-## 12. Tổng Hợp Gap Analysis
-
-Tất cả gaps phát hiện từ v1.0, phân loại theo mức độ ưu tiên:
-
-| # | Gap | Mức độ | Giải pháp |
-|---|-----|--------|----------|
-| G01 | Thiếu ActuatorLock — conflict khi 2 lệnh đến cùng lúc | 🔴 Cao | Mutex per `actuator_id` trong MCP layer, timeout tự giải phóng 5 phút |
-| G02 | UART không có queue — lệnh xung đột khi poll nhiều node | 🔴 Cao | `SerialQueue` FIFO + per-command timeout 3s + retry 3 lần |
-| G03 | SQLite thiếu `alerts.ack_at` — alert bị push notification nhiều lần | 🔴 Cao | Thêm cột `ack_at`, `ack_by` vào bảng `alerts` |
-| G04 | Thiếu bảng `schedules` và `SchedulerService` | 🔴 Cao | Schema mục 6.4 + service chạy check mỗi phút trong daemon |
-| G05 | Thiếu `ConversationSession` — AI mất context khi chờ xác nhận | 🟠 Trung bình | Session store per `chat_id`, timeout 5 phút, `pending_confirmations` queue |
-| G06 | AES-256 tùy chọn cho actuator commands — rủi ro replay attack | 🟠 Trung bình | Bắt buộc encrypt actuator commands (Flags Bit 1 = 1 bắt buộc) |
-| G07 | OTA firmware chưa có thiết kế chi tiết | 🟠 Trung bình | Quy trình 6 bước mục 7.3, triển khai Phase 4 |
-| G08 | Thiếu MCP tools: `get_node_status`, `get_system_summary`, `generate_daily_report` | 🟡 Thấp | Implement trong Phase 2–3 |
-| G09 | Thiếu MCP tools: `schedule_actuator`, `compare_trend`, `register_device`, `decommission_device` | 🟡 Thấp | Implement trong Phase 3 |
-| G10 | Thiếu rules R07 (battery low), R08 (actuator overtime), R09 (correlation) | 🟡 Thấp | Bổ sung vào Rule Engine config; R08 ưu tiên cao hơn |
-| G11 | Chưa có deploy guide — dependency management, systemd services | 🟡 Thấp | Thêm `pyproject.toml`, systemd unit files, setup script |
+| Module | Mô tả | Ưu tiên |
+|--------|-------|---------|
+| Web UI | Dashboard HTML/JS kết nối MCP HTTP | 🟢 Thấp |
+| ML Models | LightGBM, LSTM-TCN, Isolation Forest | 🟢 Thấp |
+| ESP32 firmware | LoRa mesh node firmware | 🟡 Trung bình |
+| OTA firmware | Cập nhật ESP32 qua LoRa | 🟢 Thấp |
+| Scheduler | Lịch tưới tự động | 🟡 Trung bình |
+| Safety Layer | Logic validator semantic AI check | 🟡 Trung bình |
 
 ---
 
-### ML-specific Gaps
+## 13. Tổng Hợp Gap Analysis
 
-| # | Gap | Mức độ | Giải pháp | Liên quan |
-|---|-----|--------|-----------|-----------|
-| G11 | Univariate AD chưa có training baseline | Cao | Thu thập 7 ngày data đầu → tự động tính mean/std | Phase 2 |
-| G12 | Isolation Forest chưa có data để train | Trung bình | Cần ~2 tháng data đa dạng; có thể dùng synthetic data hoặc NASA POWER | Phase 3 |
-| G13 | Weather LSTM chưa có pipeline download NASA POWER | Cao | Xây script download + preprocess từ `pynasapower` | Phase 4 |
-| G14 | LightGBM soil moisture chưa có huấn luyện | Trung bình | Train trên laptop với NASA POWER + fine-tune khi có sensor data | Phase 3 |
-| G15 | ONNX export pipeline chưa thiết lập | Trung bình | Tham khảo `torch.onnx.export` + ONNX Runtime trên RPi | Phase 4 |
-| G16 | Battery prediction cần 30 ngày data pin | Cao | Bắt đầu ghi pin ngay từ Phase 1 | Phase 1 |
-| G17 | Chưa có cơ chế retrain model tự động | Trung bình | Script cron hàng tuần: collect data mới → retrain → replace model | Phase 4 |
-| G18 | Chưa có evaluation metrics cho ML models | Thấp | Log RMSE, MAE, Precision, Recall mỗi lần inference | Phase 2 |
+### Resolved Gaps
+
+| # | Gap | Giải pháp | Trạng thái |
+|---|-----|----------|-----------|
+| G01 | ActuatorLock | `asyncio.Lock` per device trong DeviceManager | ✅ Đã giải quyết |
+| G02 | UART SerialQueue | SerialAdapter + per-device lock | ✅ Đã giải quyết |
+| G03 | Alert acknowledgment | Alert qua EventBus, notifier đa kênh | ✅ Đã giải quyết |
+| G04 | Background recorder | `sensor_poller/` + `database_manager/` event-driven | ✅ Đã giải quyết |
+| G05 | ConversationSession | edge-agent Session giữ message history | ✅ Đã giải quyết |
+| G10 | Rule engine | 8 rules (R01-R08 + R09 missing data) | ✅ Đã giải quyết |
+| G11 | Deploy guide | `doc/system-design.md` + module docs | ✅ Đã giải quyết |
+
+### Còn lại
+
+| # | Gap | Mức độ | Ghi chú |
+|---|-----|--------|---------|
+| G06 | AES-256 | 🟠 Trung bình | Protocol thiết kế có flag Encrypted, chưa code |
+| G07 | OTA firmware | 🟠 Trung bình | Chưa có firmware ESP32 |
+| G08 | Web UI | 🟢 Thấp | MCP HTTP endpoint sẵn sàng, cần frontend |
+| G09 | Scheduler | 🟡 Trung bình | Lịch tưới tự động chưa triển khai |
+| G12-G18 | ML models | 🟢 Thấp | LightGBM, LSTM-TCN, ONNX chưa tích hợp |
+| — | ESP32 firmware | 🟡 Trung bình | Chưa có firmware code trong repo |
+| — | Tests | 🟡 Trung bình | Chưa có test suite chính thức |
 
 ---
 
-*Tài liệu này sẽ được cập nhật theo từng phase triển khai.*
+*Tài liệu này được cập nhật theo từng phase triển khai.*

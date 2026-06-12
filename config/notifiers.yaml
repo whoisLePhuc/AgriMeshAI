@@ -1,0 +1,34 @@
+# AgriMeshAI — Notifier Configuration
+# Enable/disable channels as needed. Disabled channels are not loaded.
+# Tokens and secrets can use ${ENV_VAR} syntax for environment variables.
+
+notifiers:
+  # Console: prints alerts to stderr (always useful for debugging)
+  console:
+    enabled: true
+
+  # Telegram: push notifications to your phone via Bot API
+  # Create a bot: https://t.me/BotFather → /newbot → get token
+  # Get chat ID: send a message to your bot, then visit
+  #   https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
+  telegram:
+    enabled: false
+    bot_token: "${TELEGRAM_BOT_TOKEN}"    # or paste token directly
+    chat_id: "${TELEGRAM_CHAT_ID}"        # or paste chat ID directly
+
+  # Webhook: HTTP POST JSON to any endpoint
+  # Useful for Home Assistant, Blynk, IFTTT, custom dashboards
+  webhook:
+    enabled: false
+    url: "https://hooks.example.com/agrimesh"
+    headers:
+      Authorization: "Bearer ${WEBHOOK_TOKEN}"
+
+  # SMS: send via GSM module over serial (SIM800, SIM7600, etc.)
+  # Requires pyserial-asyncio and a serial-connected GSM module
+  sms:
+    enabled: false
+    port: "/dev/ttyUSB2"
+    baud_rate: 115200
+    to: "+84901234567"                    # recipient phone number
+    pin: ""                               # SIM PIN (if any)
