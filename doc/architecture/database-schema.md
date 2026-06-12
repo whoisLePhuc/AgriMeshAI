@@ -98,6 +98,8 @@ ON r.node_id = latest.node_id AND r.sensor_id = latest.sensor_id;
 ## 6. Migration Script (device_id TEXT → node_id INTEGER FK)
 
 ```sql
+BEGIN TRANSACTION;
+
 -- Bước 1: Tạo bảng nodes từ dữ liệu readings cũ
 INSERT INTO nodes (lora_addr, node_type, status)
 SELECT DISTINCT device_id, 'sensor', 'active'
@@ -121,12 +123,19 @@ SELECT r.timestamp, n.node_id, r.sensor_id, r.value, r.unit, r.downsampled
 FROM readings r
 INNER JOIN nodes n ON n.lora_addr = r.device_id;
 
--- Bước 4: Swap bảng
-DROP TABLE readings;
+-- Bước 4: Swap bảng (an toàn: chỉ rename sau khi COMMIT đã thành công)
+ALTER TABLE readings RENAME TO readings_old;
 ALTER TABLE readings_new RENAME TO readings;
 
--- Bước 5: Tạo lại indexes
-CREATE INDEX idx_readings_node_sensor_time
+COMMIT;
+
+-- Bước 5: Tạo lại indexes (sau COMMIT — nếu fail, dữ liệu đã an toàn trong bảng mới)
+CREATE INDEX IF NOT EXISTS idx_readings_node_sensor_time
     ON readings (node_id, sensor_id, timestamp);
-CREATE INDEX idx_readings_timestamp ON readings(timestamp);
+CREATE INDEX IF NOT EXISTS idx_readings_timestamp ON readings(timestamp);
+
+-- Bước 6: Dọn dẹp (chỉ chạy sau khi xác nhận không có vấn đề)
+-- DROP TABLE readings_old;  -- uncomment sau khi verify
 ```
+
+> **Rollback:** Nếu cần rollback sau bước 3, chỉ cần `ROLLBACK;` — cả 2 bảng cũ đều intact. Bảng `readings_old` được giữ lại cho đến khi người dùng xác nhận xóa thủ công.

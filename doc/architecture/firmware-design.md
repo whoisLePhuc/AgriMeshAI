@@ -59,9 +59,14 @@ void uart_isr() {
     ringbuf.head = (ringbuf.head + 1) % UART_RX_BUF_SIZE;
 }
 
-// Main: đọc dòng
-int read_line(char* out, size_t max_len) {
-    // đọc từ tail đến khi gặp '\n'
+// TX flow control: khi burst unsolicited messages, delay 5-10ms
+// giữa các frame để Edge có thời gian drain buffer
+void uart_send_flow(const char* fmt, ...) {
+    static uint32_t last_tx = 0;
+    uint32_t now = millis();
+    if (now - last_tx < 5) delay(5 - (now - last_tx));  // min 5ms gap
+    // gửi frame qua UART
+    last_tx = millis();
 }
 ```
 
@@ -199,6 +204,8 @@ setup():
   - Gửi ANNOUNCE (0x02) ngay sau khi join mesh thành công
   
 OnDataReceived(source, data):
+  if source != 0x0001: return       // lora_addr whitelist — chỉ nhận lệnh từ Gateway
+
   case RELAY_CMD (0x10):
     relay_id = data[1], cmd = data[2], duration = *(uint32*)(data+3)
     if cmd == ON:  setRelay(relay_id, ON),  start timer(duration)
@@ -221,6 +228,7 @@ loop():
 
 ### Safety
 
+- **lora_addr whitelist:** `if (source != 0x0001) return;` — actuator chỉ chấp nhận RELAY_CMD từ Gateway (0x0001). Chặn mọi packet giả mạo từ node không xác định
 - Max ON duration: 30 phút (hard clamp, bất kể lệnh từ Edge)
 - Nếu relay ON quá 30 phút → tự động OFF (watchdog safety)
 - Mỗi relay độc lập

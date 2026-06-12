@@ -50,10 +50,12 @@ Text-based AT commands, 115200 baud 8N1. Kết thúc bằng `\r\n`.
 ### 1.4 Quy tắc Edge
 
 - **SEQ:** Edge tự quản lý uint8_t counter (0-255, wrap-around). Mỗi request gửi `SEQ=<counter>`. Gateway chỉ echo SEQ vào response — không tự sinh. Unsolicited messages (TEMP_REPORT, RELAY_REPORT, NODE_JOIN) không có SEQ.
+- **SEQ timestamp tracking:** Edge lưu `{seq: n, sent_at: timestamp}` trong pending map và auto-reject mọi response đến sau `sent_at + timeout * retries` (6s). Xử lý hoàn toàn vấn đề SEQ wrap-around và response zombie từ mesh.
+- **Serialization:** Edge chỉ gửi tối đa 1 request pending đến Gateway tại một thời điểm. Gateway không cần command queue — Edge tự serialize AT commands qua asyncio.
 - **Timeout:** 2s cho mỗi request
 - **Retry:** 3 lần, backoff cố định (không exponential — do LoRa đã chậm). Mỗi retry dùng SEQ mới
 - Nếu hết retry → `+ERR:2,timeout,SEQ=<last_seq>`
-- Gateway response có thể out-of-order (do LoRa mesh latency) — SEQ cho phép match response với request gốc
+- Gateway response có thể out-of-order (do LoRa mesh latency) — SEQ + timestamp matching đảm bảo ghép đúng
 
 ## 2. LoRa Mesh Packet (giữa các LoRa node)
 

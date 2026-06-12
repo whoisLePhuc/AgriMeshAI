@@ -5,6 +5,13 @@
 
 ---
 
+## 0. Quy tắc chung
+
+- **Edge serialize AT commands:** chỉ gửi tối đa 1 request pending đến Gateway tại một thời điểm. Gateway không cần command queue.
+- **SEQ matching:** Edge tự quản lý counter uint8_t (0-255). Lưu `{seq, sent_at}` — auto-reject response đến sau `sent_at + 6s` (timeout 2s × retries 3).
+- **Unsolicited messages** (TEMP_REPORT, RELAY_REPORT, NODE_JOIN) không có SEQ — Edge xử lý ngay khi nhận.
+- **UART:** 115200 baud 8N1. Kết thúc `\r\n`. Buffer 1024B.
+
 ## 1. AT Commands (Edge → Gateway → LoRa)
 
 ### AT+GET_TEMP
