@@ -1,7 +1,7 @@
 # Sensor Poller — Thiết kế module
 
 > **Module:** `sensor_poller/`
-> **Phiên bản:** 1.0
+> **Phiên bản:** 2.0
 > **Ngày:** 12/06/2026
 
 ---
@@ -10,14 +10,15 @@
 
 ### Mục đích
 
-`sensor_poller` là vòng lặp polling cảm biến chạy nền. Module này đọc giá trị cảm biến theo khoảng thời gian cấu hình, sau đó publish sự kiện `db_write` đến `EventQueueManager`.
+`sensor_poller` là vòng lặp polling cảm biến chạy nền. Module này đọc giá trị cảm biến theo khoảng thời gian cấu hình trong TOML profile, sau đó publish sự kiện `db_write` đến `EventQueueManager`.
 
 - Không ghi trực tiếp vào SQLite — chỉ publish event
 - Mỗi thiết bị chạy task riêng, không block lẫn nhau
-- Jitter ngẫu nhiên tránh storm request
-- Lọc chỉ công cụ số, bỏ qua công cụ có tham số
+- Jitter ngẫu nhiên (0 đến full interval) tránh burst khi khởi động
+- Lọc chỉ công cụ numeric có command, bỏ qua công cụ có tham số bắt buộc
+- Per-device interval đọc từ TOML profile (`[recording] poll_interval_ms`)
 
-Module hoạt động như một producer: đọc dữ liệu từ phần cứng, đẩy vào queue để `database_manager` xử lý ghi sau.
+Module hoạt động như một producer: đọc dữ liệu từ phần cứng qua `DeviceManager`, đẩy vào queue để `DatabaseManager` xử lý ghi sau.
 
 ### Vị trí trong hệ thống
 
@@ -27,19 +28,19 @@ TOML profile ([recording] enabled, poll_interval_ms)
     ▼
 sensor_poller — run_recorder()
     │
-    ├── _recordable_routes() → lọc công cụ số, bỏ tham số
+    ├── _recordable_routes() → lọc công cụ numeric + có command
     │
     └── Tạo 1 task asyncio per device
             │
             ▼
             _poll_device() — vòng lặp với jitter
                 │
-                ├── Đọc cảm biến qua DeviceManager
+                ├── Đọc cảm biến qua DeviceManager.call_tool()
                 │
                 └── Publish "db_write" → EventQueueManager
                         │
                         ▼
-                        database_manager — _handle_write()
+                        DatabaseManager — _handle_write()
                             │
                             ▼
                             SQLite (WAL mode)
@@ -49,10 +50,10 @@ sensor_poller — run_recorder()
 
 - Không ghi DB trực tiếp — chỉ publish event, decouple khỏi SQLite
 - Mỗi device một task — slow device không block fleet
-- Jitter ngẫu nhiên — tránh tất cả device đồng loạt request
-- Chỉ công cụ số — bỏ qua công cụ có tham số (ví dụ: `control_actuator`)
+- Jitter ngẫu nhiên (0-interval) khi start — tránh tất cả device đồng loạt request
+- Chỉ công cụ numeric có command — bỏ qua công cụ handler-only hoặc có tham số bắt buộc
+- Interval theo từng device — config trong TOML, không hardcode
 - Graceful shutdown — drain queue trước khi hủy task
-- Config qua TOML — không hardcode interval
 
 ---
 
@@ -69,39 +70,48 @@ sensor_poller/
 ### Luồng dữ liệu chi tiết
 
 ```
-Config (TOML profile)
+Config (TOML profile — [recording] section)
     │
     ▼
-run_recorder(system_manager, event_queue, stop_event)
+run_recorder(device_manager, event_queue, stop_event)
     │
     ▼
-_recordable_routes(system_manager)
+_recordable_routes(device_manager) → dict[str, list[ToolRoute]]
     │
-    ├── Lọc tool có outputSchema numeric
-    ├── Bỏ tool có required arguments
-    └── Trả list[(device_id, sensor_id, tool_name)]
+    ├── Lọc tool có returns.type numeric (float, number, int, integer)
+    ├── Lọc tool có command (không phải handler-only)
+    ├── Bỏ tool có required params
+    ├── Bỏ device có recording.enabled = false
+    └── Group theo device name
     │
     ▼
 Tạo N task asyncio (1 per device)
     │
     ▼
-_poll_device(device_id, routes, interval_ms, stop_event)
+_poll_device(device_name, routes, device_manager, event_queue, interval_s, stop_event)
+    │
+    ├── Jitter: await asyncio.sleep(random.uniform(0, interval_s))
     │
     ├── while not stop_event.is_set()
     │   │
-    │   ├── Jitter: sleep(random.uniform(0, interval_ms * 0.1))
+    │   ├── Gọi từng tool route
+    │   │   ├── device_manager.call_tool(namespaced_name, {})
+    │   │   ├── Parse kết quả → float
+    │   │   └── Publish "db_write" (device_id, sensor_id, value, unit)
     │   │
-    │   ├── Gọi từng tool trong routes
-    │   │   ├── read_sensor → value, unit
-    │   │   └── ...
-    │   │
-    │   ├── Publish "db_write" event
-    │   │   device_id, sensor_id, value, unit, timestamp
-    │   │
-    │   └── Sleep(interval_ms - jitter)
+    │   └── await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+    │       ├── stop_event → break
+    │       └── timeout → poll lại
     │
-    └── Khi stop_event.set() → thoát vòng lặp
+    └── Khi stop_event.set() → asyncio.gather() hoàn thành
 ```
+
+### Khác biệt với version 1.0
+
+- `run_recorder` nhận `DeviceManager` (không phải `SystemManager`)
+- Interval đọc từ TOML profile mỗi device, không phải tham số function
+- Jitter 0-interval (không phải 0-10%)
+- Event `db_write` không gửi timestamp (để `DatabaseManager` tự gán)
 
 ---
 
@@ -111,36 +121,35 @@ _poll_device(device_id, routes, interval_ms, stop_event)
 
 ```python
 async def run_recorder(
-    system_manager: SystemManager,
+    device_manager: DeviceManager,
     event_queue: EventQueueManager,
     stop_event: asyncio.Event,
-    poll_interval_ms: int = 5000
-)
+) -> None
 ```
 
 **Công dụng:** Điểm vào duy nhất. Tạo task nền cho mỗi thiết bị, mỗi task chạy vòng lặp polling độc lập.
 
-**Sử dụng bởi:** `mcp_server.run_daemon_loops()` khởi chạy khi chế độ daemon.
-
 **Tham số:**
 
-| Tham số | Mặc định | Ý nghĩa |
-|---------|----------|---------|
-| `system_manager` | bắt buộc | Để gọi tool đọc cảm biến |
-| `event_queue` | bắt buộc | EventQueueManager để publish `db_write` |
-| `stop_event` | bắt buộc | asyncio.Event dừng tất cả task |
-| `poll_interval_ms` | 5000 | Khoảng thời gian giữa 2 lần đọc (ms) |
+| Tham số | Kiểu | Ý nghĩa |
+|---------|------|---------|
+| `device_manager` | `DeviceManager` | Để gọi tool đọc cảm biến và lấy routes |
+| `event_queue` | `EventQueueManager` | Publish `db_write` |
+| `stop_event` | `asyncio.Event` | Dừng tất cả task |
+
+**Lưu ý:** `run_recorder` hiện tại **không** được gọi từ `mcp_server.run_daemon_loops()`. Module này có thể chạy độc lập nếu cần background recording. Interval được lấy từ `device.model.recording.poll_interval_ms` trong TOML profile.
 
 ### 3.2 _poll_device
 
 ```python
 async def _poll_device(
-    device_id: str,
-    routes: list[tuple[str, str, str]],  # (sensor_id, tool_name, unit)
-    interval_ms: int,
+    device_name: str,
+    routes: list[ToolRoute],
+    device_manager: DeviceManager,
+    event_queue: EventQueueManager,
+    interval_s: float,
     stop_event: asyncio.Event,
-    event_queue: EventQueueManager
-)
+) -> None
 ```
 
 **Công dụng:** Vòng lặp polling cho một thiết bị cụ thể. Chạy độc lập với các thiết bị khác.
@@ -148,54 +157,67 @@ async def _poll_device(
 **Luồng hoạt động:**
 
 ```python
-while not stop_event.is_set():
-    # Jitter ngẫu nhiên 0-10% interval
-    jitter = random.uniform(0, interval_ms * 0.001 * 0.1)
-    await asyncio.sleep(jitter)
+# Jitter ngẫu nhiên 0-interval khi bắt đầu (tránh burst)
+await asyncio.sleep(random.uniform(0, interval_s))
 
-    for sensor_id, tool_name, unit in routes:
+while not stop_event.is_set():
+    for route in routes:
         try:
-            value = await system_manager.call_tool(tool_name, {})
+            namespaced = f"{device_name}.{route.tool_name}"
+            result = await device_manager.call_tool(namespaced, {})
+
+            value = float(result.data)
+            unit = route.returns.unit or ""
+
             await event_queue.publish("db_write",
-                device_id=device_id,
-                sensor_id=sensor_id,
+                device_id=device_name,
+                sensor_id=route.tool_name,
                 value=value,
                 unit=unit,
-                timestamp=datetime.now().isoformat()
             )
         except Exception:
-            # Log và tiếp tục — không dừng vòng lặp
-            pass
+            logger.warning(...)  # Log và tiếp tục — không dừng vòng lặp
 
-    # Sleep phần còn lại của interval
-    await asyncio.sleep(interval_ms * 0.001 - jitter)
+    # Chờ interval, thoát sớm nếu stop
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        break
+    except asyncio.TimeoutError:
+        pass  # interval elapsed, poll lại
 ```
 
 ### 3.3 _recordable_routes
 
 ```python
-def _recordable_routes(system_manager: SystemManager) -> list[tuple[str, str, str, str]]:
-    # Trả về: [(device_id, sensor_id, tool_name, unit), ...]
+def _recordable_routes(device_manager: DeviceManager) -> dict[str, list[ToolRoute]]
+    # Returns: {device_name: [ToolRoute, ...]}
 ```
 
-**Công dụng:** Lọc danh sách công cụ để chỉ giữ lại công cụ có thể ghi nhận.
+**Công dụng:** Lọc danh sách routes từ `DeviceManager` để chỉ giữ lại công cụ có thể poll tự động.
 
 **Quy tắc lọc:**
 
 | Tiêu chí | Hành vi |
 |----------|---------|
-| outputSchema là numeric | Giữ lại — có thể ghi vào DB |
-| outputSchema không phải numeric | Bỏ qua — không ghi được |
-| Có required arguments | Bỏ qua — không thể gọi không tham số |
-| Không có arguments | Giữ lại — gọi trực tiếp |
+| `recording.enabled = false` | Bỏ qua toàn bộ device |
+| `route.command is None` | Bỏ qua (handler-only, không có command text) |
+| `returns.type` là numeric | Giữ lại — có thể ghi vào DB |
+| `returns.type` không phải numeric | Bỏ qua — không ghi được |
+| Có required params | Bỏ qua — không thể gọi với `{}` |
 
-**Ví dụ:**
+**Ví dụ kết quả:**
 
-```
-read_sensor (outputSchema: number, no args)     → GIỮ
-get_battery (outputSchema: number, no args)     → GIỮ
-control_actuator (has args: {duration: int})    → BỎ
-read_config (outputSchema: string)              → BỎ
+```python
+{
+    "farm_sensor": [
+        ToolRoute(device=..., tool_name="get_moisture", command="READ", returns=ToolReturns(type="float", unit="percent")),
+        ToolRoute(device=..., tool_name="get_temperature", command="READ", returns=ToolReturns(type="float", unit="celsius")),
+    ],
+    "mqtt_sensor": [
+        ToolRoute(device=..., tool_name="get_temperature", command="READ_TEMP", returns=ToolReturns(type="float", unit="celsius")),
+        ToolRoute(device=..., tool_name="get_humidity", command="READ_HUMID", returns=ToolReturns(type="float", unit="percent")),
+    ],
+}
 ```
 
 ---
@@ -205,20 +227,23 @@ read_config (outputSchema: string)              → BỎ
 ### Một task per device
 
 ```
-Device A (sensor_01, sensor_02)
-    └── Task A — _poll_device("device_A", [...], 5000, ...)
-            ├── Đọc sensor_01
-            ├── Đọc sensor_02
-            └── Sleep 5s
+Device A (farm_sensor — 2 sensors)
+    └── Task A — _poll_device("farm_sensor", [get_moisture, get_temperature], interval=5.0s)
+            ├── Jitter 0-5.0s
+            ├── Đọc moisture → float
+            ├── Đọc temperature → float
+            └── Sleep 5s (hoặc stop)
 
-Device B (sensor_03)
-    └── Task B — _poll_device("device_B", [...], 5000, ...)
-            ├── Đọc sensor_03
-            └── Sleep 5s
+Device B (mqtt_sensor — 2 sensors)
+    └── Task B — _poll_device("mqtt_sensor", [get_temperature, get_humidity], interval=5.0s)
+            ├── Jitter 0-5.0s
+            ├── Đọc temperature → float
+            ├── Đọc humidity → float
+            └── Sleep 5s (hoặc stop)
 ```
 
 **Lợi ích:**
-- Device A chậm không block Device B
+- Device A chậm (serial timeout) không block Device B
 - Mỗi task có jitter riêng, không đồng bộ hóa
 - Một device offline chỉ làm task đó fail, không ảnh hưởng fleet
 
@@ -243,30 +268,34 @@ await event_queue.publish("db_write", ...)  # ✅ Non-blocking, decoupled
 
 ### Tại sao cần lọc
 
-Không phải công cụ nào cũng trả về giá trị đo lường. Một số công cụ:
-- Trả về string (config, status) — không ghi vào time-series DB
-- Cần tham số (control_actuator) — không thể gọi tự động
-- Trả về object phức tạp — không có schema rõ ràng
+Không phải công cụ nào cũng trả về giá trị đo lường có thể poll tự động:
 
-### Logic lọc
+- Công cụ trả về string (config, status) — không ghi vào time-series DB
+- Công cụ cần tham số (control_actuator) — không thể gọi tự động
+- Công cụ handler-only (không có command) — không thể gửi qua adapter
+
+### Logic lọc thực tế
 
 ```python
-def _recordable_routes(system_manager):
-    routes = []
-    for device in system_manager.devices:
-        for tool in device.tools:
-            schema = tool.outputSchema
-            # Chỉ nhận numeric
-            if schema.get("type") not in ("number", "integer"):
-                continue
-            # Bỏ qua nếu có required arguments
-            if tool.inputSchema.get("required"):
-                continue
-            routes.append((device.id, tool.sensor_id, tool.name, tool.unit))
-    return routes
+_NUMERIC_TYPES = {"float", "number", "int", "integer"}
+
+def _recordable_routes(device_manager):
+    by_device = {}
+    for namespaced_name in device_manager.route_names:
+        route = device_manager.get_route(namespaced_name)
+        if route is None:
+            continue
+        if not route.device.model.recording.enabled:
+            continue
+        if route.command is None:          # handler-only
+            continue
+        if not route.returns or route.returns.type not in _NUMERIC_TYPES:
+            continue
+        by_device.setdefault(route.device.name, []).append(route)
+    return by_device
 ```
 
-**Kết quả:** Danh sách công cụ "an toàn" để gọi không tham số và ghi kết quả số.
+**Kết quả:** `dict[device_name, list[ToolRoute]]` — chỉ chứa công cụ "an toàn" để gọi không tham số và ghi kết quả số.
 
 ---
 
@@ -275,23 +304,21 @@ def _recordable_routes(system_manager):
 ### Jitter ngẫu nhiên
 
 ```python
-jitter = random.uniform(0, interval_ms * 0.001 * 0.1)  # 0-10% interval
-await asyncio.sleep(jitter)
+# Jitter 0 đến full interval — chỉ áp dụng lúc start
+await asyncio.sleep(random.uniform(0, interval_s))
 ```
 
 **Tác dụng:**
-- Tránh tất cả thiết bị đồng loạt request cùng lúc
+- Tránh tất cả thiết bị đồng loạt request khi `run_recorder` khởi động
 - Giảm burst load lên DeviceManager và ESP32
-- Phân tán traffic theo thời gian
+- Chỉ jitter một lần lúc start, các vòng lặp sau đồng bộ theo interval
 
 ### Ví dụ jitter
 
 | Interval | Jitter range | Thực tế |
 |----------|--------------|---------|
-| 5000 ms | 0-500 ms | Device A sleep 5.0s, Device B sleep 5.3s, Device C sleep 5.1s |
-| 30000 ms | 0-3000 ms | Các task phân tán trong 3 giây |
-
-**Lưu ý:** Jitter chỉ áp dụng trước mỗi lần đọc. Sleep chính vẫn đúng interval.
+| 5000 ms | 0-5000 ms | Device A start ngay, Device B start sau 3.2s, Device C start sau 1.1s |
+| 30000 ms | 0-30000 ms | Các task phân tán đều trong 30 giây |
 
 ---
 
@@ -300,44 +327,39 @@ await asyncio.sleep(jitter)
 ### Cơ chế dừng sạch
 
 ```
-SIGINT / SIGTERM → stop_event.set()
+stop_event.set()
     │
     ▼
-Tất cả _poll_device() kiểm tra stop_event
+Từng _poll_device() kiểm tra ở đầu vòng lặp mới
     │
-    ├── Vòng lặp hiện tại hoàn thành
-    │   ├── Đọc xong cảm biến đang dở
-    │   ├── Publish event cuối cùng
-    │   └── Thoát while loop
+    ├── Đang trong sleep → timeout → check stop → thoát
+    ├── Đang đọc cảm biến → đọc xong → check stop → thoát
+    └── Đang publish event → publish xong → check stop → thoát
     │
-    └── run_recorder() đợi tất cả task
-            │
-            ▼
-            asyncio.gather(*tasks, return_exceptions=True)
+    ▼
+run_recorder() đợi tất cả task trong asyncio.gather()
+    │
+    ▼
+finally block: cancel task còn sống, đợi hoàn thành
 ```
 
 ```python
-async def run_recorder(..., stop_event):
-    tasks = []
-    for device_id, routes in devices:
-        task = asyncio.create_task(
-            _poll_device(device_id, routes, interval_ms, stop_event, queue)
-        )
-        tasks.append(task)
-
-    # Đợi stop_event, sau đó đợi task hoàn thành vòng lặp hiện tại
-    await stop_event.wait()
-
-    # Cancel và đợi cleanup
+try:
+    await asyncio.gather(*tasks)
+except BaseException:
+    stop_event.set()
+    raise
+finally:
     for task in tasks:
-        task.cancel()
+        if not task.done():
+            task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 ```
 
 **Đảm bảo:**
 - Không mất event đang publish
-- Queue được drain trước khi thoát
-- Không có zombie task chạy ngầm
+- Task được cancel sạch, không zombie
+- `BaseException` catch bao gồm cả `CancelledError`
 
 ---
 
@@ -353,17 +375,19 @@ poll_interval_ms = 5000
 
 | Tham số | Mặc định | Ý nghĩa |
 |---------|----------|---------|
-| `enabled` | true | Bật/tắt recorder nền |
-| `poll_interval_ms` | 5000 | Khoảng thời gian đọc cảm biến (ms) |
+| `enabled` | `true` | Bật/tắt recorder nền cho device này |
+| `poll_interval_ms` | `5000` | Khoảng thời gian giữa 2 lần poll (ms) |
 
-### Thay đổi interval
+Interval có thể khác nhau giữa các device:
 
 ```toml
-# Đọc mỗi 30 giây — tiết kiệm pin, ít dữ liệu
-poll_interval_ms = 30000
+# Device A — đọc nhanh
+[recording]
+poll_interval_ms = 5000
 
-# Đọc mỗi 1 giây — nhiều dữ liệu, tốn pin
-poll_interval_ms = 1000
+# Device B — tiết kiệm pin
+[recording]
+poll_interval_ms = 60000
 ```
 
 **Khuyến nghị:**
@@ -375,13 +399,13 @@ poll_interval_ms = 1000
 
 ## 9. Giới hạn
 
-- **Không có backpressure** — nếu EventQueueManager đầy, event bị drop
+- **Không có backpressure** — nếu EventQueueManager đầy, event bị drop (`QueueFull`)
 - **Không lưu trữ local** — nếu DB offline, event mất (không có buffer local)
-- **Jitter cố định 10%** — không configurable qua TOML
 - **Chỉ hỗ trợ numeric** — không ghi string, boolean, object
 - **Không có adaptive interval** — không tự điều chỉnh khi phát hiện thay đổi nhanh
-- **Một interval cho tất cả device** — không có per-device interval
 - **Không batch publish** — mỗi sensor là một event riêng, không gộp
+- **Không tích hợp trong daemon** — `run_recorder` không được gọi bởi `mcp_server.run_daemon_loops()`, cần chạy thủ công nếu cần
+- **Không kiểm tra backpressure** — publish event mà không kiểm tra queue còn chỗ hay không
 
 ---
 
@@ -392,6 +416,7 @@ poll_interval_ms = 1000
 ```python
 from sensor_poller import run_recorder
 from event_bus import EventQueueManager
+from device_manager.manager import DeviceManager
 import asyncio
 
 queue = EventQueueManager()
@@ -399,12 +424,13 @@ await queue.start()
 
 stop_event = asyncio.Event()
 
-# Chạy nền
-await run_recorder(
-    system_manager=system_manager,
-    event_queue=queue,
-    stop_event=stop_event,
-    poll_interval_ms=5000
+# Chạy nền — interval đọc từ TOML profile mỗi device
+recorder_task = asyncio.create_task(
+    run_recorder(
+        device_manager=device_manager,
+        event_queue=queue,
+        stop_event=stop_event,
+    )
 )
 ```
 
@@ -414,13 +440,17 @@ await run_recorder(
 # Signal shutdown
 stop_event.set()
 
-# run_recorder() sẽ tự động drain queue và thoát
+# Các task tự động thoát, run_recorder cleanup
+await recorder_task
 ```
 
 ### Config TOML
 
 ```toml
-# config/profile.toml
+# device_profiles/templates/serial_sensor.toml
+[device]
+name = "serial_sensor"
+
 [recording]
 enabled = true
 poll_interval_ms = 10000  # 10 giây
@@ -429,13 +459,16 @@ poll_interval_ms = 10000  # 10 giây
 ### Xem route đã lọc
 
 ```python
-routes = _recordable_routes(system_manager)
-for device_id, sensor_id, tool_name, unit in routes:
-    print(f"{device_id}/{sensor_id}: {tool_name} ({unit})")
-# Output:
-# sensor_01/temperature: read_sensor (celsius)
-# sensor_01/humidity: read_sensor (percent)
-# sensor_02/battery: get_battery (percent)
+routes = _recordable_routes(device_manager)
+for device_name, tool_routes in routes.items():
+    for r in tool_routes:
+        namespaced = f"{device_name}.{r.tool_name}"
+        returns = f"{r.returns.type} ({r.returns.unit})" if r.returns else "?"
+        print(f"{namespaced} → {returns}")
+# farm_sensor.get_moisture → float (percent)
+# farm_sensor.get_temperature → float (celsius)
+# mqtt_sensor.get_temperature → float (celsius)
+# mqtt_sensor.get_humidity → float (percent)
 ```
 
 ---
@@ -446,3 +479,5 @@ for device_id, sensor_id, tool_name, unit in routes:
 - asyncio.Event — docs.python.org
 - random.uniform — docs.python.org
 - TOML specification — toml.io
+- DeviceManager — doc/module/device_manager.md
+- DatabaseManager — doc/module/database_manager.md

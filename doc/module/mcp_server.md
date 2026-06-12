@@ -1,7 +1,7 @@
 # MCP Server — Thiết kế module
 
 > **Module:** `mcp_server/`
-> **Phiên bản:** 1.0
+> **Phiên bản:** 2.0
 > **Ngày:** 12/06/2026
 
 ---
@@ -10,9 +10,9 @@
 
 ### Mục đích
 
-`mcp_server` là adapter giao thức MCP (Model Context Protocol). Module này chỉ làm nhiệm vụ dịch giao thức, không chứa logic nghiệp vụ.
+`mcp_server` là module giao thức MCP (Model Context Protocol). Module này chỉ làm nhiệm vụ dịch giao thức, không chứa logic nghiệp vụ.
 
-- Nhận yêu cầu từ AI agent qua MCP
+- Nhận yêu cầu từ AI agent qua MCP (stdio hoặc HTTP)
 - Định tuyến đến đúng công cụ (fleet hoặc device)
 - Trả kết quả với JSON Schema xác thực
 - Chạy ở 2 chế độ: agent (stdio) và daemon (HTTP + nền)
@@ -21,12 +21,10 @@ Module nhận `SystemManager` qua dependency injection. Không tự khởi tạo
 
 ### Hai chế độ hoạt động
 
-Module có 2 chế độ, mỗi chế độ phục vụ một mục đích khác nhau:
-
 #### Chế độ agent (stdio)
 
 ```
-AI agent (Ollama + LangChain)
+AI agent (Ollama + edge-agent)
     │
     ▼ stdin/stdout (MCP protocol)
     │
@@ -34,77 +32,77 @@ mcp_server — serve_stdio()
     │
     ▼ handle_call_tool()
     │
-FleetTools / DeviceManager
+SystemManager → FleetTools / DeviceManager
 ```
 
 - Giao tiếp trực tiếp với AI agent qua stdio
 - Mỗi tool call là một request/response đồng bộ
 - **Dùng cho:** Tương tác người dùng, truy vấn thủ công
-- **Không dùng cho:** Ghi dữ liệu nền liên tục
 
-#### Chế độ daemon (HTTP + nền)
+#### Chế độ daemon (HTTP + retention + missing-data)
 
 ```
-HTTP client (Web UI, Telegram, script)
+HTTP client (Web UI, curl, MCP client)
     │
-    ▼ HTTP POST /call_tool
+    ▼ GET/POST/DELETE /mcp (Streamable HTTP)
     │
 mcp_server — serve_http()
     │
     ▼ handle_call_tool()
     │
-FleetTools / DeviceManager
+SystemManager → FleetTools / DeviceManager
 ```
 
-- Cung cấp endpoint HTTP độc lập
-- Chạy `run_daemon_loops()` gồm recorder, retention, missing_data, HTTP server
-- **Dùng cho:** Vận hành 24/7, ghi dữ liệu tự động, dọn dẹp lịch sử
-- **Không dùng cho:** Tương tác trực tiếp với AI agent
+- Cung cấp endpoint HTTP theo chuẩn MCP Streamable HTTP
+- Chạy `run_daemon_loops()` gồm retention, missing_data, HTTP server
+- **Dùng cho:** Vận hành 24/7, dọn dẹp lịch sử
+
+> **Lưu ý:** Daemon mode hiện tại **không** chạy sensor_poller (background recorder). Sensor polling được thiết kế để chạy độc lập nếu cần.
 
 #### Tại sao cần cả hai?
 
 | Tình huống | Nếu chỉ có stdio | Nếu chỉ có HTTP |
 |------------|------------------|-----------------|
 | AI agent hỏi "nhiệt độ hiện tại" | Ổn — phản hồi ngay | Không tự nhiên — cần polling |
-| Ghi dữ liệu cảm biến mỗi 5 phút | Không thể — stdio cần agent | Ổn — daemon tự chạy |
 | Web UI gọi tool từ xa | Không thể — stdio local only | Ổn — HTTP endpoint |
 | Dọn dữ liệu cũ (retention) | Không thể — cần chạy nền | Ổn — daemon loop |
+| Kiểm tra thiết bị mất tín hiệu | Không thể — cần chạy nền | Ổn — daemon loop |
 
 **Kết luận:** stdio cho tương tác AI agent. HTTP cho vận hành độc lập. Hai chế độ bổ sung cho nhau, không thay thế.
 
 ### Vị trí trong hệ thống
 
 ```
-AI agent (LangChain + Ollama)
+AI agent (edge-agent + Ollama)
     │
     ▼ MCP stdio
     │
 mcp_server — serve_stdio()
     │
-    ├── handle_list_tools() → liệt kê tất cả công cụ
+    ├── handle_list_tools() → SystemManager → device tools + fleet tools
     │
-    └── handle_call_tool() → định tuyến
+    └── handle_call_tool() → routing
             │
-            ├── fleet.* → FleetTools (fleet.py)
+            ├── fleet.* → SystemManager → FleetTools (fleet.py)
             │   ├── list_devices
             │   ├── get_all_readings
             │   ├── get_history
             │   └── search_anomalies
             │
-            └── còn lại → DeviceManager (system_manager)
+            └── còn lại → SystemManager → DeviceManager
                 ├── read_sensor
-                ├── control_actuator
+                ├── get_moisture
                 └── ...
 ```
 
 ### Ràng buộc thiết kế
 
 - Zero domain logic — chỉ dịch giao thức, không xử lý nghiệp vụ
-- Dependency injection — nhận SystemManager từ caller, không tự khởi tạo
+- Dependency injection — nhận `SystemManager` từ caller, không tự khởi tạo
 - Timeout 30 giây — mỗi tool call bị giới hạn qua `asyncio.wait_for`
-- outputSchema — tất cả công cụ fleet trả về JSON Schema xác thực
-- Graceful shutdown — SIGINT/SIGTERM dừng sạch qua `stop_event`
-- Structured error — lỗi trả về kèm danh sách công cụ khả dụng
+- outputSchema — tất cả công cụ fleet có outputSchema JSON
+- Graceful shutdown — SIGINT/SIGTERM dừng sạch qua `stop_event` + `http_server.should_exit`
+- Structured error — lỗi trả về kèm thông báo lỗi
 
 ---
 
@@ -116,14 +114,15 @@ mcp_server — serve_stdio()
 mcp_server/
 ├── __init__.py      Export: AgriMeshAIServer
 ├── server.py        AgriMeshAIServer — MCP protocol handler
-├── fleet.py         FleetTools — 4 công cụ tổng hợp
-└── scanner.py       Device discovery (tùy chọn)
+└── fleet.py         FleetTools — 4 công cụ tổng hợp
 ```
+
+Chỉ có **3 file**. Không có `scanner.py`, không có `adapters/` hay `gateway/` subdirectory.
 
 ### Luồng dữ liệu chi tiết
 
 ```
-Client (AI agent / HTTP / Telegram)
+Client (AI agent stdin / HTTP client)
     │
     ▼
 serve_stdio() hoặc serve_http()
@@ -131,29 +130,28 @@ serve_stdio() hoặc serve_http()
     ▼
 handle_list_tools()
     │
-    ├── fleet.py → FleetTools.list_tools() → 4 tools với outputSchema
-    │
-    └── system_manager → device_tools() → N tools từ DeviceManager
+    └── system.list_tools() → device_manager.tools + fleet.tools
     │
     ▼
 handle_call_tool(name, arguments)
     │
-    ├── name.startswith("fleet.") → FleetTools.call(name, args)
-    │   ├── list_devices → ReadingStore
-    │   ├── get_all_readings → ReadingStore
-    │   ├── get_history → ReadingStore
-    │   └── search_anomalies → ReadingStore
+    ├── name.startswith("fleet.") → system.call_tool(name, args)
+    │   ├── FleetTools.call(name, args)
+    │   │   ├── list_devices → device_manager
+    │   │   ├── get_all_readings → ReadingStore
+    │   │   ├── get_history → ReadingStore
+    │   │   └── search_anomalies → ReadingStore
+    │   └── Trả về dict kết quả
     │
-    └── còn lại → system_manager.call_tool(name, args)
-        ├── read_sensor → DeviceManager → ESP32
-        ├── control_actuator → DeviceManager → ESP32
-        └── ...
+    └── còn lại → system.call_tool(name, args)
+        ├── DeviceManager.call_tool(name, args)
+        └── Adapter (serial/mock/mqtt) → hardware
     │
     ▼
 asyncio.wait_for(tool_call, timeout=30.0)
     │
-    ├── thành công → JSON result với outputSchema
-    └── timeout → structured error + available tools list
+    ├── thành công → CallToolResult với TextContent
+    └── timeout → isError = True + message
 ```
 
 ---
@@ -164,19 +162,22 @@ asyncio.wait_for(tool_call, timeout=30.0)
 
 ```python
 class AgriMeshAIServer:
-    def __init__(self, system_manager: SystemManager)
+    def __init__(self, system: SystemManager)
 
-    # MCP lifecycle
-    async def handle_list_tools() -> list[Tool]
-    async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]
+    # Tool handlers
+    def handle_list_tools() -> list[Tool]
+    async def handle_call_tool(name: str, arguments: dict | None) -> CallToolResult
 
-    # Transport
+    # Transport — stdio
     async def serve_stdio()
-    async def serve_http(host: str, port: int)
+    async def run_stdio()               # start system → serve stdio → stop system
+
+    # Transport — HTTP
+    async def serve_http(host="127.0.0.1", port=8374)
 
     # Daemon mode
-    async def run_daemon_loops()
-    async def run_daemon()
+    async def run_daemon_loops(host="127.0.0.1", port=8374)
+    async def run_daemon(host="127.0.0.1", port=8374)  # start → daemon loops → stop
 ```
 
 **Công dụng:** Điểm vào duy nhất cho giao thức MCP. Tất cả request từ AI agent hoặc HTTP đều đi qua `handle_call_tool()`.
@@ -187,40 +188,35 @@ class AgriMeshAIServer:
 
 ```python
 class FleetTools:
-    def __init__(self, reading_store: ReadingStore)
+    def __init__(self, device_manager: DeviceManager, store: ReadingStore)
+        # device_manager dùng cho list_devices
+        # store dùng cho get_all_readings, get_history, search_anomalies
 
-    # 4 công cụ tổng hợp
-    async def list_devices() -> list[dict]
-    async def get_all_readings() -> list[dict]
-    async def get_history(device_id: str, hours: int) -> list[dict]
-    async def search_anomalies(
-        device_id: str | None,
-        sensor_id: str | None,
-        threshold: float
-    ) -> list[dict]
+    @property
+    def tools(self) -> list[Tool]  # 4 MCP Tool definitions với outputSchema
+
+    async def call(self, tool_name: str, arguments: dict) -> dict
+        # Dispatch to handler, returns JSON-serializable dict
+
+    # Internal handlers (all receive arguments: dict)
+    async def _list_devices(self, arguments) -> dict
+    async def _get_all_readings(self, arguments) -> dict
+    async def _get_history(self, arguments) -> dict
+    async def _search_anomalies(self, arguments) -> dict
 ```
 
-**Công dụng:** Cung cấp 4 công cụ cấp fleet để AI agent truy vấn dữ liệu tổng hợp. Tất cả đều có `outputSchema` JSON Schema.
+**Công dụng:** Cung cấp 4 công cụ cấp fleet để AI agent truy vấn dữ liệu tổng hợp. Tất cả đều có `outputSchema` JSON.
 
-**Sử dụng bởi:** `server.py` định tuyến `fleet.*` prefix đến đây.
+**Sử dụng bởi:** `SystemManager.call_tool()` định tuyến `fleet.*` prefix đến `FleetTools.call()`.
 
-**outputSchema cho 4 công cụ:**
+**4 công cụ và outputSchema thực tế:**
 
-| Công cụ | outputSchema | Mô tả |
-|---------|--------------|-------|
-| `list_devices` | `{"type": "array", "items": {"type": "object", "properties": {"device_id": {"type": "string"}, "status": {"type": "string"}}}}` | Danh sách thiết bị và trạng thái |
-| `get_all_readings` | `{"type": "array", "items": {"type": "object", "properties": {"device_id": {"type": "string"}, "sensor_id": {"type": "string"}, "value": {"type": "number"}, "unit": {"type": "string"}, "timestamp": {"type": "string"}}}}` | Tất cả giá trị cảm biến mới nhất |
-| `get_history` | `{"type": "array", "items": {"type": "object", "properties": {"value": {"type": "number"}, "timestamp": {"type": "string"}}}}` | Lịch sử giá trị theo giờ |
-| `search_anomalies` | `{"type": "array", "items": {"type": "object", "properties": {"device_id": {"type": "string"}, "sensor_id": {"type": "string"}, "value": {"type": "number"}, "expected": {"type": "number"}, "deviation": {"type": "number"}, "timestamp": {"type": "string"}}}}` | Các điểm bất thường vượt ngưỡng |
-
-### 3.3 scanner.py
-
-```python
-# Device discovery — quét và đăng ký thiết bị mới
-async def scan_devices() -> list[dict]
-```
-
-**Công dụng:** Phát hiện thiết bị mới trong mạng. Hiện tại là stub, có thể mở rộng thành BLE scan hoặc LoRa discovery.
+| Công cụ | outputSchema (rút gọn) |
+|---------|----------------------|
+| `fleet.list_devices` | `{devices: [{name, description, protocol, connected, healthy, error, tools}], count}` |
+| `fleet.get_all_readings` | `{readings: [{timestamp, device_id, sensor_id, value, unit}], count}` |
+| `fleet.get_history` | `{device_id, sensor_id, readings: [{...}], count, hours_requested}` |
+| `fleet.search_anomalies` | `{anomalies: [{device_id, sensor_id, current_value, mean, stddev, sigma_distance, unit}], count, threshold_sigma, baseline_days}` |
 
 ---
 
@@ -229,39 +225,40 @@ async def scan_devices() -> list[dict]
 ### Agent mode — serve_stdio()
 
 ```python
-# main.py — khởi tạo agent
+# main.py — python main.py agent
 server = AgriMeshAIServer(system_manager)
-await server.serve_stdio()
+await server.run_stdio()
+# → system.start() → serve_stdio() → system.stop()
 ```
 
-- Đọc JSON-RPC từ stdin, ghi kết quả ra stdout
-- Mỗi dòng là một MCP message
+- Sử dụng MCP stdio transport — đọc JSON-RPC từ stdin, ghi ra stdout
+- Một MCP client (AI agent) kết nối trực tiếp
 - Kết thúc khi stdin đóng hoặc nhận SIGINT
 
 ### Daemon mode — run_daemon_loops()
 
 ```python
-# main.py — khởi tạo daemon
+# main.py — python main.py daemon
 server = AgriMeshAIServer(system_manager)
-await server.run_daemon_loops()
+await server.run_daemon()
+# → system.start() → run_daemon_loops() → system.stop()
 ```
 
-`run_daemon_loops()` khởi chạy 4 task nền song song:
+`run_daemon_loops()` khởi chạy 3 task nền song song:
 
 ```
-run_daemon_loops()
+run_daemon_loops(host, port)
     │
-    ├── recorder_loop()      ← sensor_poller — đọc cảm biến định kỳ
+    ├── _run_retention_loop()     ← database_manager.retention — dọn dữ liệu cũ (mỗi 6h)
     │
-    ├── retention_loop()     ← recorder.retention — dọn dữ liệu cũ
+    ├── _missing_data_loop()      ← rule_engine.check_missing() — kiểm tra thiết bị mất tín hiệu (mỗi 5 phút)
     │
-    ├── missing_data_loop()  ← kiểm tra thiết bị mất tín hiệu
-    │
-    └── http_server()        ← serve_http() — endpoint HTTP
+    └── http_server.serve()       ← serve_http() — endpoint MCP Streamable HTTP
 ```
 
-- 4 task chạy độc lập, một task fail không kéo theo task khác
+- 3 task chạy độc lập qua `asyncio.gather()`
 - Tất cả dùng chung `stop_event` để dừng đồng bộ
+- SIGINT/SIGTERM gọi `_request_shutdown()`: set stop_event + báo uvicorn thoát
 
 ---
 
@@ -270,98 +267,92 @@ run_daemon_loops()
 ### Định tuyến tool call
 
 ```python
-async def handle_call_tool(self, name: str, arguments: dict):
+async def handle_call_tool(self, name: str, arguments: dict | None):
+    args = arguments or {}
     if name.startswith("fleet."):
-        # fleet.list_devices → FleetTools.list_devices()
-        result = await self.fleet_tools.call(name, arguments)
+        # fleet.list_devices → SystemManager → FleetTools
+        result = await asyncio.wait_for(
+            self._system.call_tool(name, args), timeout=30.0
+        )
+        # result.success → CallToolResult với structuredContent
+        # else → CallToolResult với isError=True
     else:
-        # read_sensor → DeviceManager.read_sensor()
-        result = await self.system_manager.call_tool(name, arguments)
-    return [TextContent(type="text", text=json.dumps(result))]
+        # read_sensor → SystemManager → DeviceManager
+        adapter_result = await asyncio.wait_for(
+            self._system.call_tool(name, args), timeout=30.0
+        )
+        # adapter_result.success → {"data": adapter_result.data}
 ```
 
 **Quy tắc:**
-- Prefix `fleet.` → `FleetTools`
-- Không có prefix hoặc prefix khác → `DeviceManager` qua `SystemManager`
+- Prefix `fleet.` → `SystemManager` → `FleetTools`
+- Không có prefix hoặc prefix khác → `SystemManager` → `DeviceManager`
 
 ### Xử lý lỗi có cấu trúc
 
 ```python
 try:
     result = await asyncio.wait_for(
-        self._execute_tool(name, arguments),
-        timeout=30.0
+        self._system.call_tool(name, args), timeout=_TOOL_TIMEOUT
     )
 except asyncio.TimeoutError:
-    return self._error_response(
-        f"Tool '{name}' timed out after 30s",
-        available_tools=self._list_tool_names()
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"timed out after {_TOOL_TIMEOUT}s")],
+        isError=True,
     )
 except Exception as e:
-    return self._error_response(
-        f"Tool '{name}' failed: {e}",
-        available_tools=self._list_tool_names()
+    return CallToolResult(
+        content=[TextContent(type="text", text=str(e))],
+        isError=True,
     )
 ```
 
-**Error response format:**
-
-```json
-{
-    "error": "Tool 'fleet.get_history' timed out after 30s",
-    "available_tools": [
-        "fleet.list_devices",
-        "fleet.get_all_readings",
-        "fleet.get_history",
-        "fleet.search_anomalies",
-        "read_sensor",
-        "control_actuator"
-    ]
-}
-```
-
-**Lý do kèm danh sách công cụ:** AI agent có thể tự động chọn công cụ khác khi một công cụ fail.
+Mỗi tool call có timeout 30 giây riêng, không ảnh hưởng lẫn nhau.
 
 ---
 
 ## 6. Graceful shutdown
 
-### Cơ chế dừng sạch
+### Cơ chế dừng sạch (daemon mode)
 
 ```
 SIGINT / SIGTERM
     │
     ▼
-stop_event.set()
+_request_shutdown()
     │
-    ├── serve_stdio() → thoát vòng lặp đọc stdin
+    ├── stop_event.set()
+    │   ├── retention_loop() → kết thúc vòng lặp hiện tại
+    │   └── missing_data_loop() → kết thúc vòng lặp hiện tại
     │
-    ├── serve_http() → đóng server socket
+    ├── http_server.should_exit = True
+    │   └── uvicorn thoát sau request hiện tại
     │
-    ├── recorder_loop() → hủy task, drain queue
-    │
-    ├── retention_loop() → hủy task
-    │
-    └── missing_data_loop() → hủy task
+    └── asyncio.gather() hoàn thành → system.stop()
 ```
 
 ```python
-import signal
-
-stop_event = asyncio.Event()
+def _request_shutdown():
+    stop_event.set()
+    http_server.should_exit = True
 
 for sig in (signal.SIGINT, signal.SIGTERM):
-    loop.add_signal_handler(sig, stop_event.set)
+    loop.add_signal_handler(sig, _request_shutdown)
 
-# Tất cả loop kiểm tra stop_event.is_set() mỗi vòng
-while not stop_event.is_set():
-    await asyncio.sleep(1)
+try:
+    await asyncio.gather(*tasks)
+finally:
+    stop_event.set()
+    self._daemon_active = False
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.remove_signal_handler(sig)
+    await system.stop()
 ```
 
 **Đảm bảo:**
 - Không mất request đang xử lý
-- Queue được drain trước khi thoát
-- SQLite connection đóng sạch
+- Retention và missing-data kết thúc cycle hiện tại
+- SQLite connection đóng sạch qua `system.stop()`
 
 ---
 
@@ -370,17 +361,14 @@ while not stop_event.is_set():
 ### Timeout mỗi tool call
 
 ```python
-result = await asyncio.wait_for(
-    self.fleet_tools.get_history(device_id="s1", hours=24),
-    timeout=30.0
-)
+_TOOL_TIMEOUT = 30.0  # seconds
 ```
 
 | Tình huống | Hành vi |
 |------------|---------|
 | Tool hoàn thành trong 30s | Trả kết quả bình thường |
-| Tool chậm hơn 30s | `TimeoutError` → structured error với available tools |
-| Tool crash | `Exception` → structured error với traceback (dev mode) |
+| Tool chậm hơn 30s | `TimeoutError` → `isError=True` |
+| Tool crash | `Exception` → `isError=True` |
 | Nhiều tool call đồng thời | Mỗi call có timeout riêng, không ảnh hưởng lẫn nhau |
 
 **Tại sao 30 giây?**
@@ -399,28 +387,34 @@ AI agent (LLM) cần biết cấu trúc dữ liệu trả về để:
 - Trích xuất field cụ thể cho bước reasoning tiếp theo
 - Validate trước khi dùng làm input cho tool khác
 
-### Ví dụ outputSchema
+### Ví dụ outputSchema thực tế
 
 ```python
-# fleet.py — get_all_readings
+# fleet.py — fleet.list_devices
 Tool(
-    name="fleet.get_all_readings",
-    description="Lấy tất cả giá trị cảm biến mới nhất",
+    name="fleet.list_devices",
+    description="List all connected devices with their health status...",
     inputSchema={"type": "object", "properties": {}},
     outputSchema={
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "device_id": {"type": "string"},
-                "sensor_id": {"type": "string"},
-                "value": {"type": "number"},
-                "unit": {"type": "string"},
-                "timestamp": {"type": "string", "format": "date-time"}
+        "type": "object",
+        "properties": {
+            "devices": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "protocol": {"type": "string"},
+                        "connected": {"type": "boolean"},
+                        "healthy": {"type": "boolean"},
+                        "error": {"type": "string"},
+                        "tools": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
             },
-            "required": ["device_id", "sensor_id", "value", "timestamp"]
-        }
-    }
+            "count": {"type": "integer"},
+        },
+    },
 )
 ```
 
@@ -430,13 +424,13 @@ Tool(
 
 ## 9. Giới hạn
 
-- **Chỉ hỗ trợ JSON-RPC 2.0** — không hỗ trợ binary MCP
+- **Chỉ hỗ trợ MCP JSON-RPC** — không hỗ trợ transport khác
 - **stdio blocking** — agent mode không thể xử lý nhiều request song song
 - **HTTP không có auth** — cần thêm API key hoặc JWT nếu expose ra ngoài
-- **scanner.py chưa hoàn thiện** — chỉ là stub, chưa có discovery thực sự
 - **Không có rate limiting** — HTTP endpoint có thể bị flood
 - **FleetTools chỉ đọc** — 4 công cụ đều là read-only, không ghi dữ liệu
 - **Không có caching** — mỗi tool call đều query SQLite trực tiếp
+- **Daemon không chạy sensor_poller** — background recording cần chạy riêng nếu cần
 
 ---
 
@@ -446,56 +440,62 @@ Tool(
 
 ```python
 from mcp_server import AgriMeshAIServer
-from device_manager import SystemManager
+from system import Config, SystemManager
 
-system_manager = SystemManager()
-await system_manager.initialize()
-
-server = AgriMeshAIServer(system_manager)
+config = Config()
+system = SystemManager(config)
+server = AgriMeshAIServer(system)
 ```
 
 ### Chế độ agent (stdio)
 
 ```python
-# main.py — chạy với AI agent
-await server.serve_stdio()
-# Đọc từ stdin, ghi ra stdout
-# Kết thúc khi stdin đóng
+# python main.py agent
+await server.run_stdio()
+# → system.start() → serve_stdio() → system.stop()
 ```
 
 ### Chế độ daemon (HTTP)
 
 ```python
-# main.py — chạy 24/7
-await server.run_daemon_loops()
-# Khởi chạy 4 task nền + HTTP server
+# python main.py daemon
+await server.run_daemon()
+# → system.start() → run_daemon_loops() → system.stop()
 ```
 
 ### Gọi tool qua HTTP
 
 ```bash
-curl -X POST http://localhost:8374/call_tool \
+# MCP Streamable HTTP — endpoint /mcp
+curl -X POST http://localhost:8374/mcp \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "fleet.get_history",
-    "arguments": {
-      "device_id": "sensor_01",
-      "hours": 24
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "fleet.get_history",
+      "arguments": {
+        "device_id": "sensor_01",
+        "sensor_id": "temperature",
+        "hours": 24
+      }
     }
   }'
 ```
 
-### Xử lý lỗi timeout
+### Danh sách tools
 
 ```python
-try:
-    result = await server.handle_call_tool(
-        "fleet.search_anomalies",
-        {"threshold": 3.0}
-    )
-except asyncio.TimeoutError:
-    # Trả về AI agent với danh sách công cụ khác
-    print("Query quá chậm, thử fleet.get_all_readings thay thế")
+tools = server.handle_list_tools()
+for t in tools:
+    print(f"{t.name}: {t.description[:50]}...")
+# fleet.list_devices: List all connected devices...
+# fleet.get_all_readings: Get the most recent stored reading...
+# fleet.get_history: Get time-series history for a specific sensor...
+# fleet.search_anomalies: Find sensors whose latest reading deviates...
+# farm_sensor.get_moisture: Get current soil moisture...
+# farm_sensor.get_temperature: Get current air temperature...
 ```
 
 ---
@@ -503,6 +503,7 @@ except asyncio.TimeoutError:
 ## Tham khảo
 
 - Model Context Protocol — modelcontextprotocol.io
-- JSON-RPC 2.0 Specification — jsonrpc.org
+- MCP Streamable HTTP — spec.modelcontextprotocol.io
 - asyncio.wait_for — docs.python.org
 - Starlette HTTP server — starlette.io
+- uvicorn — uvicorn.org

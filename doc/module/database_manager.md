@@ -1,7 +1,7 @@
 # Database Manager — Thiết kế module
 
 > **Module:** `database_manager/`
-> **Phiên bản:** 1.0
+> **Phiên bản:** 2.0
 > **Ngày:** 12/06/2026
 
 ---
@@ -13,13 +13,13 @@
 `database_manager` là điểm phối hợp ghi trung tâm. Tất cả thao tác ghi SQLite đi qua module này.
 
 - `DatabaseManager` subscribe event `db_write` từ `EventQueueManager`
-- `ReadingStore` là file duy nhất nói chuyện trực tiếp với SQLite
+- `ReadingStore` là class duy nhất nói chuyện trực tiếp với SQLite (cả read và write)
 - `retention.py` dọn dữ liệu cũ qua downsample và purge
-- Read path đi tắt — `fleet.py` gọi `ReadingStore` trực tiếp
+- Read path đi tắt — `FleetTools` gọi `ReadingStore` trực tiếp
 
 Module đảm bảo:
 - Một điểm ghi duy nhất — không có race condition, không có multiple writer
-- Phân tách lỗi rõ ràng — store fail thì retry, emit fail thì log
+- Phân tách lỗi rõ ràng — store fail thì raise để retry, emit fail thì log
 - Dữ liệu an toàn — WAL mode, atomic transaction
 
 ### Vị trí trong hệ thống
@@ -33,10 +33,10 @@ EventQueueManager
     ▼
 DatabaseManager — _handle_write()
     │
-    ├── Validate fields
+    ├── Validate fields (None check)
     │
     ├── ReadingStore.record() → SQLite (WAL)
-    │   └── INSERT INTO readings (...)
+    │   └── INSERT INTO readings (timestamp, device_id, sensor_id, value, unit)
     │
     └── Emit "reading_recorded" → EventBus
             │
@@ -47,16 +47,16 @@ DatabaseManager — _handle_write()
 FleetTools — read path (đi tắt)
     │
     ▼
-ReadingStore.get_history() — SELECT (read-only)
+ReadingStore.get_history() / get_all_latest() — SELECT (read-only)
 ```
 
 ### Ràng buộc thiết kế
 
-- Một điểm ghi duy nhất — chỉ `ReadingStore` mở write connection
+- Một điểm ghi duy nhất — chỉ `DatabaseManager` gọi `ReadingStore.record()`
 - WAL mode — đọc và ghi song song không block nhau
 - Phân tách lỗi — store fail raise để retry, emit fail log only
-- Atomic retention — downsample và purge trong transaction
-- Read path đi tắt — `fleet.py` không qua `DatabaseManager`
+- Atomic retention — downsample và purge trong transaction, dùng connection riêng
+- Read path đi tắt — `FleetTools` không qua `DatabaseManager`
 
 ---
 
@@ -66,31 +66,31 @@ ReadingStore.get_history() — SELECT (read-only)
 
 ```
 database_manager/
-├── __init__.py      Export: DatabaseManager, ReadingStore
+├── __init__.py      Export: DatabaseManager, ReadingStore, run_cleanup, AnomalyResult, Reading
 ├── manager.py       DatabaseManager — event subscriber + coordinator
 ├── store.py         ReadingStore — async SQLite operations
-└── retention.py    Downsample + purge (30d → hourly, 1y purge)
+└── retention.py     run_cleanup — downsample + purge
 ```
 
 ### Luồng dữ liệu chi tiết
 
 ```
-EventQueueManager.publish("db_write", ...)
+EventQueueManager.publish("db_write", device_id, sensor_id, value, unit)
     │
     ▼
-DatabaseManager._handle_write(envelope)
+DatabaseManager._handle_write(device_id, sensor_id, value, unit)
     │
-    ├── Validate: device_id, sensor_id, value, timestamp
-    │   └── Thiếu field → raise ValueError → retry qua EventQueue
+    ├── Validate: device_id, sensor_id, value != None
+    │   └── Thiếu field → log error, return (không raise — retry vô ích)
     │
-    ├── ReadingStore.record(device_id, sensor_id, value, unit, timestamp)
-    │   ├── BEGIN TRANSACTION
-    │   ├── INSERT INTO readings (...)
-    │   └── COMMIT
+    ├── ReadingStore.record(device_id, sensor_id, value, unit, timestamp=None)
+    │   ├── INSERT INTO readings (timestamp, device_id, sensor_id, value, unit)
+    │   ├── COMMIT
+    │   └── Return Reading(timestamp, device_id, sensor_id, value, unit)
     │       ├── Thành công → tiếp tục
-    │       └── Fail → raise → retry qua EventQueue
+    │       └── Fail → raise Exception → EventQueue retry (max 3×)
     │
-    └── EventBus.emit("reading_recorded", ...)
+    └── EventBus.emit("reading_recorded", device_id, sensor_id, value, unit)
         ├── Thành công → done
         └── Fail → log warning (dữ liệu đã an toàn trong SQLite)
 ```
@@ -103,73 +103,107 @@ DatabaseManager._handle_write(envelope)
 
 ```python
 class DatabaseManager:
-    def __init__(self, event_queue: EventQueueManager, event_bus: EventBus, db_path: str)
+    def __init__(self, store: ReadingStore, event_queue: EventQueueManager, event_bus: EventBus)
+        # Subscribe "db_write" ngay trong __init__
 
-    # Lifecycle
-    async def start()     # Subscribe "db_write" vào EventQueueManager
-    async def stop()      # Unsubscribe, đóng connection
-
-    # Event handler
-    async def _handle_write(self, **data)  # Validate → store → emit
+    # Event handler (internal)
+    async def _handle_write(self, device_id=None, sensor_id=None, value=None, unit=None, **kw)
+        # Validate → store.record() → event_bus.emit()
 ```
 
 **Công dụng:** Subscriber duy nhất cho event `db_write`. Phối hợp validate, ghi, và emit.
 
-**Sử dụng bởi:** `main.py` khởi tạo và gọi `start()`. `EventQueueManager` gọi `_handle_write()` qua worker loop.
+**Không có lifecycle methods** (`start`/`stop`) — `DatabaseManager` hoạt động ngay sau `__init__`.
+
+**Sử dụng bởi:** `SystemManager` khởi tạo và inject store, event_queue, event_bus.
 
 ### 3.2 store.py — ReadingStore
 
 ```python
+class Reading(BaseModel):
+    timestamp: float       # epoch seconds
+    device_id: str
+    sensor_id: str
+    value: float
+    unit: str
+
+class AnomalyResult(BaseModel):
+    device_id: str
+    sensor_id: str
+    current_value: float
+    mean: float
+    stddev: float
+    sigma_distance: float
+    unit: str
+
 class ReadingStore:
-    def __init__(self, db_path: str)
+    def __init__(self, db_path: str | Path = "data/agrimesh.db")
+
+    # Lifecycle
+    async def init()                  # Open SQLite, create tables, WAL mode
+    async def close()                 # Close connection
 
     # Write
-    async def record(device_id, sensor_id, value, unit, timestamp) -> int  # rowid
+    async def record(device_id, sensor_id, value, unit, timestamp=None) -> Reading
+    async def record_batch(readings: list[tuple]) -> int  # list of (device_id, sensor_id, value, unit, timestamp|None)
 
     # Read (được FleetTools gọi trực tiếp)
-    async def get_history(device_id, sensor_id, hours) -> list[dict]
-    async def search_anomalies(device_id, sensor_id, threshold) -> list[dict]
-    async def get_all_readings() -> list[dict]
-    async def list_devices() -> list[dict]
+    async def get_history(device_id, sensor_id, start=None, end=None, limit=1000) -> list[Reading]
+    async def get_latest(device_id, sensor_id) -> Reading | None
+    async def get_all_latest() -> list[Reading]      # latest reading per device/sensor
+    async def search_anomalies(threshold_sigma=2.0, baseline_days=30) -> list[AnomalyResult]
+
+    # Retention support
+    async def open_retention_conn() -> tuple[Connection, bool]  # Separate connection for retention
 ```
 
-**Công dụng:** File duy nhất mở kết nối SQLite và thực thi SQL. Tất cả read/write đi qua đây.
+**Công dụng:** Class duy nhất mở kết nối SQLite và thực thi SQL. Tất cả read/write đi qua đây.
 
 **Sử dụng bởi:**
 - `DatabaseManager._handle_write()` — ghi dữ liệu mới
-- `FleetTools` — đọc history, anomalies, list devices (đi tắt)
+- `FleetTools` — đọc history, anomalies, all_latest (đi tắt)
+- `SystemManager.start()` — gọi `init()` khi khởi động
 
-**Schema SQLite:**
+**Schema SQLite thực tế:**
 
 ```sql
-CREATE TABLE readings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id TEXT NOT NULL,
-    sensor_id TEXT NOT NULL,
-    value REAL NOT NULL,
-    unit TEXT,
-    timestamp TEXT NOT NULL,  -- ISO 8601
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS readings (
+    timestamp   REAL    NOT NULL,  -- epoch seconds
+    device_id   TEXT    NOT NULL,
+    sensor_id   TEXT    NOT NULL,
+    value       REAL    NOT NULL,
+    unit        TEXT    NOT NULL,
+    downsampled INTEGER NOT NULL DEFAULT 0  -- 0 = raw, 1 = hourly average
 );
 
-CREATE INDEX idx_readings_device_sensor_time
-ON readings(device_id, sensor_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_readings_device_sensor_time
+    ON readings (device_id, sensor_id, timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_readings_downsampled
+    ON readings (downsampled, timestamp);
 ```
 
-### 3.3 retention.py
+Không có `id` hoặc `created_at` — mỗi dòng là một reading, timestamp làm key chính.
+
+### 3.3 retention.py — run_cleanup
 
 ```python
-async def run_retention(db_path: str)
+async def run_cleanup(
+    store: ReadingStore,
+    full_res_days: int = 30,
+    keep_downsampled_days: int = 365,
+) -> dict[str, int]:
+    # Returns {"downsampled": int, "purged": int}
 ```
 
 **Công dụng:** Dọn dữ liệu cũ qua 2 bước:
-1. **Downsample** — dữ liệu > 30 ngày gộp thành giá trị trung bình mỗi giờ
-2. **Purge** — xóa dữ liệu > 1 năm
+1. **Downsample** — dữ liệu > 30 ngày gộp thành giá trị trung bình mỗi giờ (flag `downsampled = 1`)
+2. **Purge** — xóa dữ liệu downsampled > 1 năm
 
 **Đặc điểm:**
-- Mở connection riêng, không dùng chung với `ReadingStore`
-- Chạy trong transaction atomic
-- Không block read path
+- Mở connection riêng qua `store.open_retention_conn()`, không dùng chung với main connection
+- Chạy trong transaction `BEGIN IMMEDIATE`
+- Dùng flag `downsampled` trong cùng bảng `readings`, không tạo bảng riêng
 
 ---
 
@@ -178,34 +212,33 @@ async def run_retention(db_path: str)
 ### Từ event đến SQLite
 
 ```
-EventQueueManager worker loop
+sensor_poller publish "db_write" → EventQueueManager
     │
     ▼
-_handle_write(device_id="s1", sensor_id="temp", value=32.5, unit="celsius", timestamp="2026-06-12T10:00:00")
+DatabaseManager._handle_write(device_id="s1", sensor_id="temp", value=32.5, unit="celsius")
     │
     ├── Validate
-    │   ├── device_id: str ✓
-    │   ├── sensor_id: str ✓
-    │   ├── value: numeric ✓
-    │   └── timestamp: ISO 8601 ✓
+    │   ├── device_id != None ✓
+    │   ├── sensor_id != None ✓
+    │   └── value != None ✓
     │
-    ├── ReadingStore.record(...)
-    │   ├── INSERT INTO readings (...) VALUES (...)
-    │   └── RETURNING id
-    │       └── rowid = 15023
+    ├── ReadingStore.record(device_id="s1", sensor_id="temp", value=32.5, unit="celsius")
+    │   ├── INSERT INTO readings (timestamp, device_id, sensor_id, value, unit)
+    │   │   VALUES (1718000000.0, 's1', 'temp', 32.5, 'celsius')
+    │   └── Return Reading(timestamp=1718000000.0, device_id='s1', ...)
     │
     └── EventBus.emit("reading_recorded",
             device_id="s1",
             sensor_id="temp",
             value=32.5,
-            rowid=15023
+            unit="celsius"
         )
 ```
 
 **Thứ tự quan trọng:**
-1. Validate trước — tránh ghi dữ liệu rác
+1. Validate trước — tránh gọi store với dữ liệu null
 2. Store trước, emit sau — đảm bảo dữ liệu an toàn trước khi thông báo
-3. Emit fail không rollback store — dữ liệu đã lưu, chỉ notifier không nhận được
+3. Emit fail không raise — dữ liệu đã lưu, chỉ notifier không nhận được
 
 ---
 
@@ -235,36 +268,41 @@ _handle_write()
 | Emit fail | Log warning, không raise | Dữ liệu đã lưu, chỉ notifier không nhận được |
 
 **Kết quả:**
-- Store fail: event ở lại queue, retry tự động
+- Store fail: event ở lại queue, retry tự động (max 3 lần, backoff exponential)
 - Emit fail: event được xử lý xong, chỉ mất notification
 
-### Code minh họa
+### Code thực tế
 
 ```python
-async def _handle_write(self, **data):
-    # 1. Validate
-    self._validate_fields(data)
+async def _handle_write(self, device_id=None, sensor_id=None, value=None, unit=None, **kw):
+    # 1. Validate — None fields → log error, không retry
+    if device_id is None or sensor_id is None or value is None:
+        logger.error("db_write missing fields: ...")
+        return  # Không raise — retry vô ích
 
     # 2. Store — nếu fail, raise để EventQueue retry
-    rowid = await self.store.record(
-        device_id=data["device_id"],
-        sensor_id=data["sensor_id"],
-        value=data["value"],
-        unit=data.get("unit"),
-        timestamp=data["timestamp"]
-    )
+    try:
+        await self._store.record(
+            device_id=device_id,
+            sensor_id=sensor_id,
+            value=value,
+            unit=unit or "",
+        )
+    except Exception as e:
+        logger.error("db_write failed: %s", e)
+        raise  # Retry hợp lý — chưa ghi được
 
     # 3. Emit — nếu fail, chỉ log (dữ liệu đã an toàn)
     try:
-        await self.event_bus.emit("reading_recorded",
-            device_id=data["device_id"],
-            sensor_id=data["sensor_id"],
-            value=data["value"],
-            rowid=rowid
+        await self._event_bus.emit("reading_recorded",
+            device_id=device_id,
+            sensor_id=sensor_id,
+            value=value,
+            unit=unit or "",
         )
     except Exception as e:
-        logger.warning(f"emit reading_recorded failed: {e}")
-        # Không raise — event đã xử lý xong
+        logger.warning("reading_recorded emit failed: %s", e)
+        # Không raise — dữ liệu đã an toàn trong SQLite
 ```
 
 ---
@@ -273,76 +311,64 @@ async def _handle_write(self, **data):
 
 ### Chiến lược dữ liệu theo thời gian
 
-| Khoảng thời gian | Độ chi tiết | Hành động |
-|------------------|-------------|-----------|
-| 0-30 ngày | Raw (mỗi lần đọc) | Giữ nguyên |
-| 30 ngày - 1 năm | Hourly (trung bình) | Downsample |
-| > 1 năm | Xóa | Purge |
+| Khoảng thời gian | Độ chi tiết | downsampled flag |
+|------------------|-------------|------------------|
+| 0-30 ngày | Raw (mỗi lần đọc) | `0` |
+| 30 ngày - 1 năm | Hourly (trung bình) | `1` |
+| > 1 năm | Xóa | — |
 
 ### Downsample chi tiết
 
-```sql
--- Bước 1: Tạo bảng hourly mới (nếu chưa có)
-CREATE TABLE IF NOT EXISTS readings_hourly (
-    device_id TEXT NOT NULL,
-    sensor_id TEXT NOT NULL,
-    hour TEXT NOT NULL,  -- YYYY-MM-DD HH:00:00
-    avg_value REAL NOT NULL,
-    min_value REAL,
-    max_value REAL,
-    count INTEGER,
-    PRIMARY KEY (device_id, sensor_id, hour)
-);
+Dùng chung bảng `readings`, phân biệt bằng cột `downsampled`:
 
--- Bước 2: Gộp dữ liệu cũ
-INSERT OR REPLACE INTO readings_hourly
+```sql
+-- Bước 1: Chèn hourly averages với downsampled = 1
+INSERT INTO readings (timestamp, device_id, sensor_id, value, unit, downsampled)
 SELECT
+    CAST(CAST(timestamp / 3600 AS INTEGER) * 3600 AS REAL),  -- đầu giờ
     device_id,
     sensor_id,
-    strftime('%Y-%m-%d %H:00:00', timestamp) as hour,
-    AVG(value) as avg_value,
-    MIN(value) as min_value,
-    MAX(value) as max_value,
-    COUNT(*) as count
+    AVG(value),
+    unit,
+    1
 FROM readings
-WHERE timestamp < datetime('now', '-30 days')
-GROUP BY device_id, sensor_id, hour;
+WHERE timestamp < ?                    -- cutoff = now - 30 days
+  AND downsampled = 0                  -- chỉ xử lý raw data
+GROUP BY device_id, sensor_id, unit, CAST(timestamp / 3600 AS INTEGER);
 
--- Bước 3: Xóa raw data đã gộp
-DELETE FROM readings
-WHERE timestamp < datetime('now', '-30 days');
+-- Bước 2: Xóa raw data đã được downsample
+DELETE FROM readings WHERE timestamp < ? AND downsampled = 0;
 ```
 
 ### Purge
 
 ```sql
--- Xóa dữ liệu > 1 năm (cả raw và hourly)
-DELETE FROM readings WHERE timestamp < datetime('now', '-1 year');
-DELETE FROM readings_hourly WHERE hour < datetime('now', '-1 year');
+-- Xóa tất cả downsampled readings > 1 năm
+DELETE FROM readings WHERE timestamp < ? AND downsampled = 1;
 ```
 
 ### Atomic execution
 
 ```python
-async def run_retention(db_path: str):
-    conn = await aiosqlite.connect(db_path)
+async def run_cleanup(store: ReadingStore, full_res_days=30, keep_downsampled_days=365):
+    db, should_close = await store.open_retention_conn()
     try:
-        await conn.execute("BEGIN EXCLUSIVE")
+        await db.execute("BEGIN IMMEDIATE")
         # Downsample
-        await conn.execute("INSERT OR REPLACE INTO readings_hourly ...")
-        await conn.execute("DELETE FROM readings WHERE ...")
+        await db.execute("INSERT INTO readings (...) SELECT ... WHERE ...")
+        await db.execute("DELETE FROM readings WHERE ... AND downsampled = 0")
         # Purge
-        await conn.execute("DELETE FROM readings WHERE ...")
-        await conn.execute("DELETE FROM readings_hourly WHERE ...")
-        await conn.commit()
-    except Exception:
-        await conn.rollback()
+        await db.execute("DELETE FROM readings WHERE ... AND downsampled = 1")
+        await db.commit()
+    except BaseException:
+        await asyncio.shield(db.rollback())
         raise
     finally:
-        await conn.close()
+        if should_close:
+            await db.close()
 ```
 
-**Lưu ý:** `BEGIN EXCLUSIVE` để tránh xung đột với write path. Retention chạy đêm khuya khi load thấp.
+**Lưu ý:** Retention dùng connection riêng (không phải main connection của `ReadingStore`) để không block read/write path. Giao dịch `BEGIN IMMEDIATE` để tránh deadlock.
 
 ---
 
@@ -351,10 +377,10 @@ async def run_retention(db_path: str):
 ### Tại sao read path đi tắt
 
 ```
-FleetTools.get_history()
+FleetTools.get_history() / get_all_latest()
     │
     ▼
-ReadingStore.get_history()  ← Đi tắt, không qua DatabaseManager
+ReadingStore.get_history() / get_all_latest()  ← Đi tắt, không qua DatabaseManager
     │
     ▼
 SQLite — SELECT (read-only)
@@ -371,9 +397,9 @@ SQLite — SELECT (read-only)
 | | Write path | Read path |
 |---|------------|-----------|
 | Đi qua | EventQueue → DatabaseManager → ReadingStore | FleetTools → ReadingStore |
-| Validate | Có — field bắt buộc | Không — query param |
+| Validate | Có — None check | Không — query param |
 | Emit event | Có — `reading_recorded` | Không |
-| Retry | Có — qua EventQueue | Không — fail trả về client |
+| Retry | Có — qua EventQueue (3×) | Không — fail trả về client |
 | WAL mode | Write connection | Read connection (song song) |
 
 ---
@@ -383,7 +409,7 @@ SQLite — SELECT (read-only)
 ### Tại sao WAL mode
 
 ```python
-await conn.execute("PRAGMA journal_mode=WAL")
+await self._db.execute("PRAGMA journal_mode=WAL")
 ```
 
 | Chế độ | Đọc-ghi song song | Crash recovery | Hiệu suất |
@@ -396,14 +422,9 @@ await conn.execute("PRAGMA journal_mode=WAL")
 - `retention.py` chạy dọn dữ liệu không làm treo query
 - Jetson Nano với SD card — WAL giảm fsync, tăng tuổi thọ thẻ nhớ
 
-### WAL checkpoint
+### Lưu ý WAL
 
-```python
-# Tự động checkpoint khi WAL file > 1000 pages
-await conn.execute("PRAGMA wal_autocheckpoint=1000")
-```
-
-**Lưu ý:** WAL file (`*.wal`) tồn tại song song với DB chính. Nếu app crash, WAL chứa transaction chưa commit có thể recover.
+WAL file (`*.db-wal`, `*.db-shm`) tồn tại song song với DB chính. Nếu app crash, WAL chứa transaction chưa commit có thể recover khi mở lại database.
 
 ---
 
@@ -411,7 +432,7 @@ await conn.execute("PRAGMA wal_autocheckpoint=1000")
 
 - **Chỉ SQLite** — không hỗ trợ PostgreSQL, MySQL, InfluxDB
 - **Một write connection** — không có connection pool
-- **Retention chưa có lịch tự động** — cần gọi thủ công hoặc qua daemon loop
+- **Retention chạy trong daemon loop** — 6 giờ một lần, không có lịch tùy chỉnh
 - **Không có partition** — bảng readings lớn có thể chậm sau 1 năm
 - **Downsample chỉ có hourly** — không có daily, weekly aggregation
 - **Không có backup** — chỉ một file DB, chưa có replicate hoặc export
@@ -430,10 +451,10 @@ from event_bus import EventQueueManager, EventBus
 
 queue = EventQueueManager()
 bus = EventBus()
-store = ReadingStore("data/readings.db")
+store = ReadingStore("data/agrimesh.db")
 
-manager = DatabaseManager(queue, bus, "data/readings.db")
-await manager.start()  # Subscribe "db_write"
+manager = DatabaseManager(store, queue, bus)
+# Đã subscribe "db_write" ngay trong __init__
 ```
 
 ### Ghi dữ liệu qua event
@@ -445,12 +466,11 @@ await queue.publish("db_write",
     sensor_id="temperature",
     value=32.5,
     unit="celsius",
-    timestamp="2026-06-12T10:00:00"
 )
 
 # DatabaseManager tự động xử lý:
 # 1. Validate fields
-# 2. Store.record() → SQLite
+# 2. store.record() → SQLite
 # 3. Emit "reading_recorded"
 ```
 
@@ -461,26 +481,27 @@ await queue.publish("db_write",
 history = await store.get_history(
     device_id="sensor_01",
     sensor_id="temperature",
-    hours=24
+    start=time.time() - 86400,  # 24 hours ago
+    limit=100,
 )
-# [{"value": 32.5, "timestamp": "2026-06-12T10:00:00"}, ...]
+# [Reading(timestamp=..., device_id='sensor_01', sensor_id='temperature', value=32.5, unit='celsius'), ...]
 ```
 
 ### Chạy retention
 
 ```python
-from database_manager.retention import run_retention
+from database_manager.retention import run_cleanup
 
-# Chạy một lần (thường gọi từ daemon loop đêm khuya)
-await run_retention("data/readings.db")
-# Downsample > 30d → hourly, purge > 1y
+# Chạy một lần (thường gọi từ daemon loop mỗi 6h)
+result = await run_cleanup(store, full_res_days=30, keep_downsampled_days=365)
+# result = {"downsampled": 1500, "purged": 200}
 ```
 
 ### Xử lý lỗi store
 
 ```python
-# Nếu SQLite bị lock, store.record() raise
-# EventQueueManager tự động retry 3×
+# Nếu SQLite bị lỗi, store.record() raise
+# EventQueueManager tự động retry 3 lần với backoff (1s, 2s, 4s)
 # Sau 3 lần → DLQ
 
 dlq = queue.get_dlq()
@@ -496,4 +517,3 @@ for item in dlq:
 - SQLite WAL mode — sqlite.org/wal.html
 - aiosqlite — github.com/omnilib/aiosqlite
 - Event-driven architecture — docs.python.org/asyncio
-- Time-series downsample pattern — influxdata.com
