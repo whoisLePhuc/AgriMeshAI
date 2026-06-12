@@ -91,7 +91,7 @@ def run_agent(
     """
     import yaml
     from system import Config, SystemManager
-    from mcp_server.gateway.server import AgriMeshAIServer
+    from mcp_server.server import AgriMeshAIServer
 
     # 1. start gateway
     config = Config(
@@ -164,7 +164,7 @@ def run_daemon(
     Polls sensors 24/7 and serves MCP over HTTP.
     """
     from system import Config, SystemManager
-    from mcp_server.gateway.server import AgriMeshAIServer
+    from mcp_server.server import AgriMeshAIServer
 
     config = Config(
         profiles_dir=profiles_dir,

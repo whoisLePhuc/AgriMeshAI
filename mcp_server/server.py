@@ -26,11 +26,12 @@ from mcp.types import (
     ToolsCapability,
 )
 
-from mcp_server.gateway.recorder import run_recorder
 from recorder.retention import run_cleanup
 from system.manager import SystemManager
 
 logger = logging.getLogger(__name__)
+
+_TOOL_TIMEOUT = 30.0
 
 
 class AgriMeshAIServer:
@@ -66,7 +67,9 @@ class AgriMeshAIServer:
         # Fleet tools
         if name.startswith("fleet."):
             try:
-                result = await self._system.call_tool(name, args)
+                result = await asyncio.wait_for(
+                    self._system.call_tool(name, args), timeout=_TOOL_TIMEOUT
+                )
                 if result.success:
                     data = result.data
                     return CallToolResult(
@@ -78,6 +81,12 @@ class AgriMeshAIServer:
                         content=[TextContent(type="text", text=result.error or "unknown error")],
                         isError=True,
                     )
+            except asyncio.TimeoutError:
+                logger.error("fleet tool %s timed out after %ss", name, _TOOL_TIMEOUT)
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"timed out after {_TOOL_TIMEOUT}s")],
+                    isError=True,
+                )
             except Exception as e:
                 logger.exception("fleet tool %s failed", name)
                 return CallToolResult(
@@ -86,12 +95,17 @@ class AgriMeshAIServer:
                 )
 
         # Device tools
-        adapter_result = await self._system.call_tool(name, args)
+        try:
+            adapter_result = await asyncio.wait_for(
+                self._system.call_tool(name, args), timeout=_TOOL_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.error("device tool %s timed out after %ss", name, _TOOL_TIMEOUT)
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"timed out after {_TOOL_TIMEOUT}s")],
+                isError=True,
+            )
         if adapter_result.success:
-            # Only record on client tool calls — the background
-            # recorder handles periodic recording in daemon mode.
-            if not self._daemon_active:
-                await self._maybe_record(name, adapter_result.data)
             data = {"data": adapter_result.data}
             return CallToolResult(
                 content=[TextContent(type="text", text=str(data))],
@@ -104,54 +118,6 @@ class AgriMeshAIServer:
                 )],
                 isError=True,
             )
-
-    # Types that can be stored as float in the time-series store
-    _NUMERIC_TYPES = {"float", "number", "int", "integer"}
-
-    async def _maybe_record(self, tool_name: str, raw_data: Any) -> None:
-        """Record a sensor reading to the store if the tool returns a numeric type.
-
-        Best-effort — failures are logged, never raised. The tool call
-        has already succeeded; storage is a side effect.
-        """
-        dm = self._system.device_manager
-        store = self._system.store
-        if store is None:
-            return
-
-        route = dm.get_route(tool_name)
-        if not route or not route.returns:
-            return
-
-        if route.returns.type not in self._NUMERIC_TYPES:
-            return
-
-        try:
-            value = float(raw_data)
-        except (TypeError, ValueError):
-            logger.debug(
-                "skipping store for %s: cannot convert %r to float",
-                tool_name, raw_data,
-            )
-            return
-
-        unit = route.returns.unit or ""
-        try:
-            await store.record(
-                device_id=route.device.name,
-                sensor_id=route.tool_name,
-                value=value,
-                unit=unit,
-            )
-            await self._system.event_queue.publish(
-                "reading_recorded",
-                device_id=route.device.name,
-                sensor_id=route.tool_name,
-                value=value,
-                unit=unit,
-            )
-        except Exception:
-            logger.warning("failed to record reading for %s", tool_name, exc_info=True)
 
     # ------------------------------------------------------------------
     # stdio transport
@@ -317,7 +283,6 @@ class AgriMeshAIServer:
                     pass
 
         tasks = [
-            run_recorder(system.device_manager, system.store, stop_event, bus=system.event_queue),
             self._run_retention_loop(stop_event),
             _missing_data_loop(),
             http_server.serve(),

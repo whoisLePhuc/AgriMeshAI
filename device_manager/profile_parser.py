@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from mcp_server._compat import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # Python <3.11
 from pathlib import Path
 
 from pydantic import ValidationError
