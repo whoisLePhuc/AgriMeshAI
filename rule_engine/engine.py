@@ -17,7 +17,7 @@ import yaml
 from event_bus import EventBus
 
 if True:  # TYPE_CHECKING workaround
-    from recorder.store import ReadingStore
+    from database_manager.store import ReadingStore
 
 logger = logging.getLogger(__name__)
 

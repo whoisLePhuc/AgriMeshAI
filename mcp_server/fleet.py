@@ -14,7 +14,7 @@ from typing import Any
 from mcp.types import Tool
 
 from device_manager.manager import DeviceManager
-from recorder.store import ReadingStore
+from database_manager.store import ReadingStore
 
 # The four fleet tools, defined as MCP Tool schemas
 FLEET_TOOLS: list[Tool] = [
