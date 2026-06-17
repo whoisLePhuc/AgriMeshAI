@@ -1,6 +1,6 @@
 # Data Flow Diagram — End-to-End Scenarios
 
-> **Phiên bản:** 1.1 | **Ngày:** 12/06/2026
+> **Phiên bản:** 2.0 | **Ngày:** 17/06/2026
 > **Nhóm:** Architecture & Design — 🔴 Bắt buộc
 
 ---
@@ -8,28 +8,32 @@
 ## Scenario 1: Sensor Periodic Push (định kỳ mỗi 60s)
 
 ```
-┌──────────┐   LoRa    ┌────────────┐  UART    ┌────────────┐       ┌──────────────┐
-│ Sensor   │──────────►│ LoRa       │─────────►│ Edge       │       │  User        │
-│ Node     │ packet    │ Gateway    │ AT cmd   │ Gateway    │       │  (Telegram/  │
-│          │ 0x01      │            │+TEMP_    │            │       │   MCP)       │
-│ DHT22    │ sensor_id │ parse      │ REPORT   │ SQLite     │       │              │
-│ đọc temp │ value     │→UART send  │:1,0,25.3 │ store      │       │              │
-│ mỗi 60s  │           │            │          │ EventBus   │       │              │
-└──────────┘           └────────────┘          │→RuleEngine │       │              │
-                                               │ →Notifier  │       │              │
-```                                            └────────────┘       └──────────────┘
+┌──────────┐   LoRa    ┌────────────┐  UART    ┌────────────────────┐       ┌──────────────┐
+│ Sensor   │──────────►│ LoRa       │─────────►│ Edge Gateway       │       │  User        │
+│ Node     │ packet    │ Gateway    │ AT cmd   │ (Python)           │       │  (Telegram/  │
+│          │ 12 bytes  │            │+TEMP_    │                    │       │   MCP)       │
+│ DHT22    │ sensor_id │ parse      │ REPORT   │ SerialATAdapter    │       │              │
+│ đọc temp │ seq       │→UART send  │:1,0,25.3 │ → _dispatch_line() │       │              │
+│ + hum    │ timestamp │            │          │ → cache_set()      │       │              │
+│ mỗi 60s  │ value f32 │            │          │ → on_temp_report   │       │              │
+└──────────┘           └────────────┘          │ → SQLite store      │       │              │
+                                                │ → EventBus emit     │       │              │
+                                                │   → RuleEngine      │       │              │
+                                                │   → Notifier        │       │              │
+```                                                └────────────────────┘       └──────────────┘
 
 **Chi tiết:**
 
 1. Sensor đọc DHT22 → `dht.readTemperature()` → 25.3°C
-2. Tạo payload: `[0x01][0][25.3 as float32 LE]` (6 bytes)
-3. `LoRaMesher::Send(GATEWAY_ADDR, payload)`
-4. LoRa Gateway nhận `OnDataReceived(source, data)`
-5. Parse type=0x01 → `+TEMP_REPORT:<node_id>,0,25.3\r\n` → UART send
-6. Edge nhận → SerialATAdapter.parse → `TEMP_REPORT` event
-7. SQLite: `INSERT INTO readings (...)`
-8. EventBus: emit `reading_recorded` → RuleEngine check
-9. Nếu >40°C → alert → Telegram
+2. Tạo `SensorReading` struct (12 bytes packed): `[0x01][sensor_id][seq][timestamp][value_f32]`
+3. `LoRaMesher::Send(0x0001, payload)` — gửi đến Gateway
+4. LoRa Gateway nhận `on_loRa_data(source, data)` — switch case `MSG_SENSOR_DATA`
+5. Kiểm tra pending `PEND_TEMP`:
+   - Có → `+TEMP:node,sensor,val,SEQ=n` (solicited)
+   - Không → `+TEMP_REPORT:node,sensor,val` (unsolicited)
+6. Python SerialATAdapter nhận → `_dispatch_line()` parse → cache → callback
+7. `DatabaseManager._handle_write()` → `ReadingStore.record()` → SQLite
+8. EventBus emit `reading_recorded` → RuleEngine check rules
 
 ## Scenario 2: User Queries Temperature (cache-first + pull)
 
@@ -38,75 +42,59 @@ User ──► MCP ──► SystemManager
   "nhiệt độ
    khu A?"
             │
-            ├── Check SQLite cache: reading cuối cùng < 90s?
-            │   ├── YES → trả cache ngay (push interval = 60s, TTL = 90s)
+            ├── Check sensor cache: reading < 90s?
+            │   ├── YES → trả cache ngay
             │   │   ◄── "Khu A: 25.3°C (cập nhật 20s trước)"
             │   │
-            │   └── NO (cache stale or user yêu cầu real-time) →
-            │       SerialATAdapter
-            │       AT+GET_TEMP=1,SEQ=42\r\n
-            │       ──UART──► LoRa Gateway
-            │                │
-            │                │ LoRa: PING (0x20)
-            │                │ ──LoRa──► Sensor Node
-            │                │          │
-            │                │          │ ◄──PONG──
-            │                │          │ LoRa: request temp
-            │                │          │ ──LoRa──► Sensor Node
-            │                │          │          │
-            │                │          │ ◄──0x01──
-            │                │          │ +TEMP:1,0,25.3,SEQ=42
-            │                │ ◄──UART──│
-            │                │ parse SEQ=42 → return to pending
-            │ ◄──result──────│
+            │   └── NO (cache stale) →
+            │       SerialATAdapter.at_get_temp(node_id)
+            │       ┌── AT+GET_TEMP=1,SEQ=42\r\n
+            │       │   ──UART──► LoRa Gateway
+            │       │            │
+            │       │            ├── Gửi PING (0x20) → Sensor PONG
+            │       │            ├── Gửi 0xFF → Sensor trả data
+            │       │            └── +TEMP:1,0,25.3,SEQ=42\r\n
+            │       │   ◄──UART──│
+            │       │   parse SEQ=42 → resolve pending Future
+            │       │   → cache_set() → trả user
+            │ ◄──────│
 ◄─ trả lời──│
 ```
-
-**Chi tiết:**
-
-1. Edge nhận lệnh "nhiệt độ khu A?"
-2. Lookup SQLite cache: `readings` WHERE `node_id=1 AND sensor_id='0' ORDER BY timestamp DESC LIMIT 1`
-3. Nếu `timestamp > now - 90s` → trả cache, end
-4. Nếu cache stale → gửi `AT+GET_TEMP=1,SEQ=42\r\n`
-5. LoRa Gateway: PING → PONG → request temp → parse response
-6. Gateway echo `+TEMP:1,0,25.3,SEQ=42\r\n`
-7. Edge match SEQ=42 với pending request → parse → cache → trả user
-8. Nếu timeout → `+ERR:2,timeout,SEQ=42` → trả cache cũ nếu có
 
 ## Scenario 3: User Controls Actuator
 
 ```
-User ──► Safety ──► MCP ──► SystemManager
+User ──► Safety ──► SystemManager.call_tool("actuator.relay", {})
   "tưới khu B         Check:
-   10 phút"           - node online
-                      - duration ≤ 30ph
-                      - không actuator nào đang chạy xung đột
-                      
-                      SerialATAdapter
-                      AT+SET_RELAY=2,0,1,600\r\n
+   10 phút"           - node online (health check)
+                      - duration ≤ 30 phút
+                      - relay đang OFF
+
+                      SerialATAdapter.at_set_relay(2, 0, 1, 600)
+                      AT+SET_RELAY=2,0,1,600,SEQ=43\r\n
                       ──UART──► LoRa Gateway
+                               │ handle_command → parse_relay
+                               │ → alloc_pending(PEND_ACK)
                                │
                                │ LoRa: RELAY_CMD (0x10)
-                               │ relay_id=0, cmd=1 ON, dur=600s
+                               │ relay_id=0, cmd=1 ON, dur=600000ms
                                │ ──LoRa──► Actuator Node
                                │          │
-                               │          │ setRelay(0, ON)
+                               │          │ set_relay(0, ON)
                                │          │ start auto-off timer (600s)
-                               │          │ gửi RELAY_ACK (0x11)
+                               │          │ blink_request = 1
+                               │          │ send_ack → RELAY_ACK (0x11)
                                │ ◄──LoRa──│
-                               │ +RELAY_ACK:2,0,ON
+                               │ +RELAY_ACK:2,0,ON,SEQ=43
                       ◄──UART──│
-                      parse response
-                      
-User ◄── "Đã bật bơm khu B (tự động tắt sau 10 phút)" ── MCP
+                      parse SEQ=43 → resolve Future
+                      → "Đã bật bơm khu B (tự động tắt sau 10 phút)"
 ```
 
 **Safety checks (Edge thực hiện trước khi gửi):**
-
-1. Node actuator có online không? (check last_seen)
+1. Node actuator có online không? (health check status)
 2. Duration ≤ 30 phút? (clamp nếu quá)
 3. Relay đang OFF? (nếu đang ON → báo user)
-4. Ghi log vào `actuation_log` table
 
 ## Scenario 4: Node Auto-Discovery
 
@@ -114,73 +102,69 @@ User ◄── "Đã bật bơm khu B (tự động tắt sau 10 phút)" ── 
 Node mới boot
      │
      ├── LoRaMesher.Start()
-     ├── Join mesh (sponsor-based join)
+     ├── Join mesh
      │
      ├── Gửi ANNOUNCE broadcast (0x02)
      │   └── node_type=0 (sensor), fw_ver=0x10
      │
      ▼
-LoRa Gateway nhận OnDataReceived
+LoRa Gateway nhận on_loRa_data → MSG_ANNOUNCE
      │
-     ├── Parse type=0x02 → ANNOUNCE
-     ├── +NODE_JOIN:0xA1B2,0,1.0\r\n  (lora_addr, sensor, fw)
-     │
-     ▼
-Edge nhận +NODE_JOIN
-     │
-     ├── Tạo node_id mới (max existing + 1)
-     ├── SQLite: INSERT INTO nodes (node_id, lora_addr, type, status='active')
-     ├── Gửi AT+NODE_ACK=0xA1B2,5\r\n
+     ├── find_or_add_node(src, ntype) → thêm vào node table
+     ├── at_fmt_node_join → +NODE_JOIN:0xA1B2,0,1.0\r\n
      │
      ▼
-LoRa Gateway nhận AT+NODE_ACK (internal, không forward LoRa)
+Edge SerialATAdapter nhận +NODE_JOIN
      │
-     └── OK — mapping complete
+     ├── Auto-assign node_id (next_node_id++)
+     ├── Lưu vào self.nodes dict
+     ├── Fire on_node_join callback
+     ├── Gửi AT+NODE_ACK=0xA1B2,5,SEQ=1\r\n
+     │
+     ▼
+LoRa Gateway nhận AT+NODE_ACK
+     │
+     └── Cập nhật node_table[idx].node_id = new_id
+         → mapping hoàn tất
+```
 
-## Scenario 5: Actuator Offline → Rejoin + State Sync
+## Scenario 5: Actuator Rejoin + State Sync
 
 ```
-Actuator Node mất LoRa kết nối (interference, distance)
+Actuator Node mất LoRa kết nối → tự động rejoin
      │
-     │  LoRaMesher tự detect DISCOVERY state
-     │  (không nhận sync beacon > 5 superframes)
-     │
-     │  ┌──────────────────────────────────────────┐
-     │  │ RELAY VẪN ON nếu timer chưa hết!         │
-     │  │ (auto-off timer chạy độc lập trên node)  │
-     │  └──────────────────────────────────────────┘
-     │
-     ▼
-Actuator tự động rejoin (LoRaMesher self-healing)
-     │
-     ├── Gửi ANNOUNCE broadcast (0x02)
-     │   └── node_type=1 (actuator), fw_ver=0x10
+     ├── Gửi ANNOUNCE (0x02) với node_type=1 (actuator)
      │
      ▼
 LoRa Gateway nhận ANNOUNCE
      │
-     ├── Check: lora_addr này đã có node_id?
-     │   ├── YES (đây là rejoin)
-     │   │   ├── UART: +NODE_JOIN:0xE5F6,1,1.0  (Edge update last_seen)
-     │   │   └── Gửi RELAY_SYNC (0x12) đến Actuator
-     │   │       → Actuator trả RELAY_ACK cho từng channel
-     │   │       → Gateway forward +RELAY_REPORT:<node_id>,<ch>,<state>
-     │   │       → Edge biết ngay trạng thái relay thực tế
+     ├── Check: lora_addr đã có trong node table?
      │   │
-     │   └── NO (node mới thật) → Edge gán node_id như scenario 4
+     │   ├── YES (rejoin)
+     │   │   ├── +NODE_JOIN:0xE5F6,1,1.0 (Edge update last_seen)
+     │   │   └── RELAY_SYNC (0x12) → Actuator
+     │   │       → Actuator trả RELAY_ACK cho từng channel (có vTaskDelay 50ms)
+     │   │       → Gateway forward +RELAY_REPORT:id,ch,state
+     │   │       → Edge biết trạng thái relay thực tế
+     │   │
+     │   └── NO (node mới) → Edge gán node_id mới
      │
      ▼
-Edge update status: 'active', last_seen = now()
+Edge update nodes dict
 ```
 
-**Heartbeat (Edge initiative — mỗi 2 phút):**
+**Heartbeat (Gateway initiative — mỗi 2 phút):**
+```
+LoRa Gateway firmware:
+  for each actuator node:
+    Gửi PING (0x20) → chờ PONG 5s
+  Sau 5s: at_fmt_hb(responded, total, seq)
+  → +HB:2/3,SEQ=1\r\n  (2/3 actuator responded)
+```
 
+**Rule Engine missing data check (daemon loop — mỗi 5 phút):**
 ```
-Edge ──► Gateway: AT+PING=<node_id>,SEQ=<n>   (PING tất cả actuator nodes)
-     ──► Gateway ──► Actuator: PING (0x20)
-          ◄── PONG OK → Gateway → Edge: +PONG:<node_id>,SEQ=<n>  → update last_seen
-          ◄── timeout (5s) → Gateway → Edge: +ERR:2,timeout,SEQ=<n>
-               → Edge: UPDATE nodes SET status='offline'
-               → log warning vào event_log
-```
+RuleEngine.check_missing(hours=1.0)
+  → ReadingStore.get_all_latest()
+  → Nếu last_seen > 1h → emit "alert_triggered" (R09)
 ```

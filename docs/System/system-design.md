@@ -1,6 +1,6 @@
 # THIẾT KẾ HỆ THỐNG
 ## AI Agent + MCP Server + LoRa Mesh — Nông Nghiệp Thông Minh
-**Phiên bản:** 4.0 (SystemManager architecture) | **Ngày:** 12/06/2026 | **Quy mô:** POC / Vườn nhỏ — 1 người dùng, < 20 node
+**Phiên bản:** 5.0 (Gateway restructure) | **Ngày:** 17/06/2026 | **Quy mô:** POC / Vườn nhỏ — 1 người dùng, < 20 node
 
 ---
 
@@ -89,7 +89,7 @@ Hệ thống kết nối người nông dân với thiết bị cảm biến và
 │  │  │  └───────────────────────────────────────────────────────────┘  │  │  │
 │  │  │                                                                 │  │  │
 │  │  │  ┌───────────────────────────────────────────────────────────┐  │  │  │
-│  │  │  │  Adapters: Mock | Serial (UART) | MQTT                    │  │  │  │
+│  │  │  │  Adapters: Mock | Serial | SerialAT | MQTT               │  │  │  │
 │  │  │  └───────────────────────────────────────────────────────────┘  │  │  │
 │  │  └─────────────────────────────────────────────────────────────────┘  │  │
 │  │                                                                       │  │
@@ -106,6 +106,36 @@ Hệ thống kết nối người nông dân với thiết bị cảm biến và
 │  OS: Ubuntu 22.04 (JetPack R32.7.6)                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 1.4. Cấu trúc thư mục hiện tại
+
+```
+agrimeshai/
+├── firmware/              ← ESP32 (sensor, actuator, LoRa gateway)
+│   ├── src/               ← 3 main files
+│   └── lib/mesh_protocol/ ← mesh_types.h, at_protocol.h, ringbuf.h
+├── gateway/               ← Python edge gateway (Jetson/RPi)
+│   ├── agent/             ← edge-agent AI framework (vendored)
+│   ├── device_manager/    ← discovery, catalog, TOML profiles
+│   ├── mcp_server/        ← MCP protocol + FleetTools
+│   ├── database_manager/  ← SQLite store, retention
+│   ├── event_bus/         ← pub/sub + async queue
+│   ├── rule_engine/       ← threshold/rate/stuck rules
+│   ├── notifier/          ← console, telegram, webhook, sms
+│   ├── sensor_poller/     ← background polling
+│   ├── system/            ← SystemManager orchestrator
+│   ├── utils/adapters/    ← Mock, Serial, SerialAT, MQTT
+│   ├── main.py            ← entry point
+│   └── config/            ← rules.yaml, notifiers.yaml
+├── docs/                  ← tài liệu
+│   └── Gateway/module/    ← module design docs (8 files)
+├── server/                ← backend server (folder sẵn sàng)
+├── mobile-app/            ← React Native app (folder sẵn sàng)
+├── main.py                ← thin wrapper → gateway.main
+└── README.md
+```
+
+### 1.5. Lớp và thiết bị
 
 | Lớp | Thành phần | Vai trò | Chạy 24/7? |
 |-----|-----------|---------|-----------|
@@ -246,22 +276,36 @@ User ──"Tưới khu A 20 phút"──► AI Agent
                             User ── "Có"
                                     │
                             ┌───────▼────────┐
-                            │ ActuatorLock   │  ← GAP G01
-                            │ mutex acquire  │
+                            │ Per-device      │
+                            │ asyncio.Lock    │
                             └───────┬────────┘
                                     │
-                            MCP: execute_actuator
+                    SystemManager.call_tool("actuator.relay", ...)
                                     │
-                            LoRa Bridge → SerialQueue  ← GAP G02
+                    DeviceManager → SerialATAdapter.send()
                                     │
-                            [LoRa] ──► Actuator Node
-                                    │       │
-                                    │       ├─ kích relay
-                                    │       └─ trả ACK
+                    AT+SET_RELAY=1,0,1,1200,SEQ=42\r\n
                                     │
-                            SQLite: actuation_log
+                            ┌───────▼────────┐
+                            │ LoRa Gateway   │
+                            │ (ESP32)        │
+                            │ handle_command │
+                            └───────┬────────┘
                                     │
-                            AI Agent ──► "Đã bật bơm khu A."
+                            MSG_RELAY_CMD (LoRa)
+                                    │
+                            ┌───────▼────────┐
+                            │ Actuator Node  │
+                            │ (ESP32)        │
+                            ├── kích relay
+                            ├── auto-off timer
+                            └── trả RELAY_ACK (LoRa)
+                                    │
+                            LoRa Gateway → +RELAY_ACK:SEQ=42
+                                    │
+                            SerialATAdapter → resolve future
+                                    │
+                            AI Agent ──► "Đã bật bơm khu A 20 phút."
 ```
 
 > ⚠️ **GAP G01 — ActuatorLock:** Nếu 2 lệnh đến cùng lúc từ Telegram và Web, hành vi không xác định. Cần mutex per `actuator_id`, timeout tự giải phóng sau 5 phút.
@@ -271,11 +315,17 @@ User ──"Tưới khu A 20 phút"──► AI Agent
 ### 4.3. Health check định kỳ
 
 ```
-Gateway Daemon (mỗi 10 phút)
+Gateway Daemon (mỗi 2 phút — HEARTBEAT_INTERVAL_MS)
     │
-    ├──[LoRa] ping ──► Node A ──► PONG trong 30s → status: ONLINE
-    ├──[LoRa] ping ──► Node B ──► Không trả lời  → status: OFFLINE → alert
-    └──[LoRa] ping ──► Node C ──► PONG trong 30s → status: ONLINE
+    LoRa Gateway firmware: PING tất cả actuator nodes
+    │
+    ├── Node A ──► PONG trong 5s → +HB:1/3,SEQ=n
+    ├── Node B ──► không trả lời → bỏ qua
+    └── Node C ──► PONG trong 5s → +HB:2/3,SEQ=n
+    │
+    Python SerialATAdapter: log heartbeat stats
+    │
+    Rule Engine: check_missing(hours=1) — phát hiện node offline > 1h
 ```
 
 - Node OFFLINE > 2 giờ → push notification cảnh báo pin hoặc hỏng phần cứng.
@@ -356,7 +406,7 @@ MCP Server là trung tâm routing tool giữa AI Agent và hệ thống (SQLite,
 - **Framework:** `mcp.server.lowlevel.Server`
 - **Transport:** stdio (cho Agent) + Streamable HTTP (cho Web UI / MCP clients)
 - **Entry point:** `python main.py agent` (stdio) / `python main.py daemon` (HTTP)
-- **File:** `mcp_server/server.py` (319 dòng) + `mcp_server/fleet.py` (248 dòng)
+- **File:** `gateway/mcp_server/server.py` + `gateway/mcp_server/fleet.py`
 - **Dependency injection:** Nhận `SystemManager` qua constructor — không tự khởi tạo module nào
 
 ### 5.2. Kiến trúc
@@ -432,7 +482,7 @@ Chạy mỗi 6 giờ trong daemon loop qua `run_cleanup(store, full_res_days=30,
 
 ### 5.5. Device Discovery
 
-Thiết bị được định nghĩa qua file TOML trong `device_manager/device_profiles/`:
+Thiết bị được định nghĩa qua file TOML trong `gateway/device_manager/device_profiles/`:
 
 ```toml
 [device]
@@ -488,6 +538,7 @@ class DeviceManager:
 |---------|----------|-------------|
 | **MockAdapter** | In-memory | Testing, development |
 | **SerialAdapter** | UART (pyserial-asyncio) | ESP32, Arduino qua USB/UART |
+| **SerialATAdapter** | UART + AT protocol | LoRa Gateway (ESP32) — command/response với SEQ |
 | **MQTTAdapter** | MQTT (paho-mqtt) | WiFi devices (Pico W, ESP32) |
 
 Base interface (tại `utils/adapters/base.py`):
@@ -700,7 +751,7 @@ Rules được định nghĩa trong `config/rules.yaml`, có thể hot-reload. A
 
 > ⚠️ **Hiện trạng:** Các ML models dưới đây là thiết kế mục tiêu. Codebase hiện tại mới chỉ có statistical anomaly detection (baseline deviation ±σ qua SQLite) trong `ReadingStore.search_anomalies()`. LightGBM, LSTM-TCN, ONNX chưa được tích hợp.
 
-> 📖 **Tài liệu chi tiết từng tác vụ ML được mô tả trong thư mục `docs/machine_learning/`:**
+> 📖 **Tài liệu chi tiết từng tác vụ ML được mô tả trong thư mục `docs/Gateway/machine_learning/`:**
 > - [`01-anomaly-detection.md`](machine_learning/01-anomaly-detection.md) — Univariate + Multivariate Anomaly Detection
 > - [`02-predictive.md`](machine_learning/02-predictive.md) — Dự đoán sensor (độ ẩm, nhiệt, pin)
 > - [`03-weather-forecasting.md`](machine_learning/03-weather-forecasting.md) — Dự báo thời tiết LSTM-TCN từ NASA POWER
@@ -1116,7 +1167,7 @@ chat_id: "telegram_123456"
 
 ## 11. Giao Thức LoRa Mesh
 
-> ⚠️ **Hiện trạng:** Các protocol và packet format dưới đây là thiết kế mục tiêu cho ESP32 firmware. Codebase hiện tại chưa có firmware ESP32 — chỉ có gateway adapter (SerialAdapter) để giao tiếp với LoRa module qua UART.
+> ✅ **Hiện trạng:** Firmware ESP32 đã triển khai trong `firmware/`. Gồm 3 node: sensor (DHT22), actuator (4 relay), LoRa gateway (UART AT ↔ LoRa mesh). Giao tiếp giữa Python gateway và LoRa gateway dùng AT text protocol qua UART.
 
 ### 11.1. Cấu trúc gói tin mesh
 
@@ -1135,55 +1186,73 @@ chat_id: "telegram_123456"
 
 **Dest = 0xFFFF** → Broadcast toàn mạng.
 
-### 11.2. UART Binary Protocol (Gateway ↔ LoRa Module)
+### 11.2. AT Command Protocol (Python Gateway ↔ LoRa Gateway UART)
+
+Python Gateway giao tiếp với LoRa Gateway (ESP32) qua **AT text commands** trên UART 115200 baud:
 
 ```
-┌────────────┬──────────┬─────────┬──────────────┬───────────┐
-│ Start byte │  Length  │ Command │   Payload    │ Checksum  │
-│    0x7E    │   2 B    │   1 B   │   0–250 B    │    1 B    │
-│  (fixed)   │ (LE u16) │         │              │ (XOR all) │
-└────────────┴──────────┴─────────┴──────────────┴───────────┘
+Python (SerialATAdapter)  ←── UART AT ──→  ESP32 (lora_gateway_main)
 ```
 
-| Mã | Lệnh | Hướng | Mô tả |
-|----|------|-------|-------|
-| `0x01` | `SEND_TO` | Gateway → Module | Gửi tới node cụ thể |
-| `0x02` | `BROADCAST` | Gateway → Module | Broadcast toàn mạng |
-| `0x03` | `REQUEST_DATA` | Gateway → Module | Yêu cầu đọc sensor |
-| `0x04` | `PING` | Gateway → Module | Ping một node |
-| `0x05` | `TOPOLOGY` | Gateway → Module | Yêu cầu cấu trúc mạng |
-| `0x06` | `NODE_STATUS` | Gateway → Module | Yêu cầu trạng thái node |
-| `0x10` | `DATA_RESPONSE` | Module → Gateway | Dữ liệu sensor trả về |
-| `0x11` | `PONG` | Module → Gateway | Phản hồi ping |
-| `0x12` | `ACK` | Module → Gateway | Xác nhận lệnh thành công |
-| `0x13` | `NACK` | Module → Gateway | Lệnh thất bại (kèm error code) |
-| `0x20` | `OTA_CHUNK` | Gateway → Module | Chunk firmware OTA |
-| `0xFF` | `ERROR` | Module → Gateway | Lỗi hệ thống |
+**Command format:** `AT+<CMD>=<params>,SEQ=<n>\r\n`
+**Response format:** `+<RESP>:<data>,SEQ=<n>\r\n` (solicited) hoặc `+<RESP>:<data>\r\n` (unsolicited)
 
-### 11.3. Payload formats
+| Command | Mô tả | Response |
+|---------|-------|----------|
+| `AT+GET_TEMP=<id>` | Đọc nhiệt độ sensor (2-phase) | `+TEMP:id,sensor,val,SEQ=n` |
+| `AT+SET_RELAY=<id>,<relay>,<cmd>,<dur>` | Điều khiển relay | `+RELAY_ACK:id,relay,state,SEQ=n` |
+| `AT+PING=<id>` | Ping node | `+PONG:id,SEQ=n` |
+| `AT+PING_ALL` | Ping tất cả actuator | `+HB:responded/total,SEQ=n` |
+| `AT+LIST_NODES` | Danh sách node | `+NODES:count,id,type,...,SEQ=n` |
+| `AT+NODE_INIT` | Init auto-discovery | `+NODE_INIT:OK` |
+| `AT+NODE_ACK=<addr>,<id>` | Xác nhận node_id từ Edge | `+NODE_ACK:OK` |
 
-**Sensor Data** (Node → Gateway):
-```
-┌───────┬───────────┬─────────┬───────────┐
-│ Count │ Sensor ID │  Value  │ Timestamp │
-│  1 B  │    1 B    │ 4 B f32 │  4 B u32  │
-└───────┴───────────┴─────────┴───────────┘
-```
+**Unsolicited events** (LoRa → UART):
+| Event | Khi nào | Mô tả |
+|-------|---------|-------|
+| `+TEMP_REPORT:id,sensor,val` | Sensor push định kỳ (60s) | Dữ liệu cảm biến |
+| `+RELAY_REPORT:id,relay,state` | Actuator state change | Trạng thái relay |
+| `+NODE_JOIN:addr,type,ver` | Node mới join mesh | Tự động gán node_id |
+| `+ERR:code,msg,SEQ=n` | Lỗi thực thi | Kèm mã lỗi |
 
-**Actuator Command** (Gateway → Node):
-```
-┌──────┬─────┬──────────┬──────────┐
-│ Addr │ Cmd │  Params  │ Duration │
-│  2 B │ 1 B │ 0–32 B   │   2 B    │
-└──────┴─────┴──────────┴──────────┘
-```
+### 11.3. LoRa Mesh Packet Formats (ESP32 ↔ ESP32)
 
-**Status Report** (Node → Gateway):
-```
-┌─────────┬──────┬────────┬────────┬───────┐
-│ Battery │ RSSI │ Uptime │ Errors │  Temp │
-│  1 B %  │ 1 B  │  2 B h │  1 B   │ 2 B   │
-└─────────┴──────┴────────┴────────┴───────┘
+Giữa các ESP32 node qua LoRa, dùng **LoRaMesher library** + packed structs:
+
+**Message Types** (byte 0 của payload):
+| Type | Tên | Hướng | Kích thước |
+|------|-----|-------|-----------|
+| `0x01` | `MSG_SENSOR_DATA` | Sensor → Gateway | 12 bytes |
+| `0x02` | `MSG_ANNOUNCE` | Node → Gateway | 3 bytes |
+| `0x10` | `MSG_RELAY_CMD` | Gateway → Actuator | 7 bytes |
+| `0x11` | `MSG_RELAY_ACK` | Actuator → Gateway | 3 bytes |
+| `0x12` | `MSG_RELAY_SYNC` | Gateway → Actuator | 1 byte |
+| `0x20` | `MSG_PING` | Gateway → Node | 1 byte |
+| `0x21` | `MSG_PONG` | Node → Gateway | 3 bytes |
+
+**Packet Structs** (packed, #pragma pack(1)):
+
+```cpp
+struct SensorReading {    // 12 bytes
+    uint8_t  type = 0x01;
+    uint8_t  sensor_id;   // 0=temp, 1=humidity, 2=moisture...
+    uint16_t seq;
+    uint32_t timestamp;
+    float    value;
+};
+
+struct RelayCmdPacket {   // 7 bytes
+    uint8_t  type = 0x10;
+    uint8_t  relay_id;    // 0-3
+    uint8_t  cmd;         // 0=OFF, 1=ON, 2=TOGGLE
+    uint32_t duration_ms; // 0=indefinite, max 30 phút
+};
+
+struct Announce {          // 3 bytes
+    uint8_t  type = 0x02;
+    uint8_t  node_type;    // 0=sensor, 1=actuator
+    uint8_t  fw_ver;
+};
 ```
 
 ### 11.4. Mesh Routing
@@ -1214,19 +1283,23 @@ chat_id: "telegram_123456"
 
 | Module | Công nghệ | Trạng thái | Ghi chú |
 |--------|-----------|-----------|---------|
-| SystemManager | `system/manager.py` | ✅ | Central orchestrator + DI + health check |
-| EventBus | `event_bus/` | ✅ | Pub/sub sync + async queue + DLQ + retry |
-| DeviceManager | `device_manager/` | ✅ | Discovery, catalog, routing, per-device lock |
-| MCP Server | `mcp_server/` | ✅ | stdio + Streamable HTTP, fleet tools |
-| AI Agent | `agent/src/` | ✅ | edge-agent, OllamaProvider, Session REPL |
-| ReadingStore | `database_manager/` | ✅ | SQLite WAL, time-series, batch write, anomaly search |
-| DatabaseManager | `database_manager/` | ✅ | Write coordinator, db_write subscriber |
-| Retention | `database_manager/` | ✅ | Downsample + purge, 6h cycle |
-| Sensor Poller | `sensor_poller/` | ✅ | Per-device async polling, jitter |
-| Rule Engine | `rule_engine/` | ✅ | 8 rules (threshold, rate, stuck), 5-min cooldown |
-| Notifier | `notifier/` | ✅ | Console, Telegram, Webhook, SMS |
-| Adapters | `utils/adapters/` | ✅ | Mock, Serial, MQTT |
-| TOML Profiles | `device_manager/device_profiles/` | ✅ | Templates + examples |
+| SystemManager | `gateway/system/manager.py` | ✅ | Central orchestrator + DI + health check |
+| EventBus | `gateway/event_bus/` | ✅ | Pub/sub sync + async queue + DLQ + retry |
+| DeviceManager | `gateway/device_manager/` | ✅ | Discovery, catalog, routing, per-device lock |
+| MCP Server | `gateway/mcp_server/` | ✅ | stdio + Streamable HTTP, fleet tools |
+| AI Agent | `gateway/agent/src/` | ✅ | edge-agent, OllamaProvider, Session REPL |
+| ReadingStore | `gateway/database_manager/store.py` | ✅ | SQLite WAL, time-series, batch write, anomaly search |
+| DatabaseManager | `gateway/database_manager/manager.py` | ✅ | Write coordinator, db_write subscriber |
+| Retention | `gateway/database_manager/retention.py` | ✅ | Downsample + purge, 6h cycle |
+| Sensor Poller | `gateway/sensor_poller/` | ✅ | Per-device async polling, jitter |
+| Rule Engine | `gateway/rule_engine/` | ✅ | 8 rules (threshold, rate, stuck), 5-min cooldown |
+| Notifier | `gateway/notifier/` | ✅ | Console, Telegram, Webhook, SMS |
+| Adapters | `gateway/utils/adapters/` | ✅ | Mock, Serial, SerialAT, MQTT |
+| SerialATAdapter | `gateway/utils/adapters/serial_at.py` | ✅ | AT protocol over UART cho LoRa Gateway |
+| TOML Profiles | `gateway/device_manager/device_profiles/` | ✅ | Templates + examples |
+| Firmware Sensor | `firmware/src/sensor_main.cpp` | ✅ | DHT22, LoRa, announce, retry queue |
+| Firmware Actuator | `firmware/src/actuator_main.cpp` | ✅ | 4 relay, auto-off timer, WDT, re-announce |
+| Firmware Gateway | `firmware/src/lora_gateway_main.cpp` | ✅ | UART AT ↔ LoRa mesh bridge, node table, HB |
 | Tailscale Split | — | ✅ | LLM trên PC, Agent trên Jetson |
 
 ### 12.3. Chưa triển khai
@@ -1234,11 +1307,12 @@ chat_id: "telegram_123456"
 | Module | Mô tả | Ưu tiên |
 |--------|-------|---------|
 | Web UI | Dashboard HTML/JS kết nối MCP HTTP | 🟢 Thấp |
+| Mobile App | React Native app (iOS/Android) | 🟢 Thấp |
 | ML Models | LightGBM, LSTM-TCN, Isolation Forest | 🟢 Thấp |
-| ESP32 firmware | LoRa mesh node firmware | 🟡 Trung bình |
 | OTA firmware | Cập nhật ESP32 qua LoRa | 🟢 Thấp |
 | Scheduler | Lịch tưới tự động | 🟡 Trung bình |
 | Safety Layer | Logic validator semantic AI check | 🟡 Trung bình |
+| Server | Backend server module (folder sẵn sàng) | 🟢 Thấp |
 
 ---
 
@@ -1248,25 +1322,27 @@ chat_id: "telegram_123456"
 
 | # | Gap | Giải pháp | Trạng thái |
 |---|-----|----------|-----------|
+| G00 | Watchdog phần cứng | ESP32 Task WDT 30s trong sensor + actuator firmware | ✅ Đã giải quyết |
 | G01 | ActuatorLock | `asyncio.Lock` per device trong DeviceManager | ✅ Đã giải quyết |
-| G02 | UART SerialQueue | SerialAdapter + per-device lock | ✅ Đã giải quyết |
-| G03 | Alert acknowledgment | Alert qua EventBus, notifier đa kênh | ✅ Đã giải quyết |
+| G02 | UART SerialQueue | SerialATAdapter + per-device lock + SEQ matching | ✅ Đã giải quyết |
+| G03 | Alert acknowledgment | EventBus → Notifier (console, telegram, webhook, sms) | ✅ Đã giải quyết |
 | G04 | Background recorder | `sensor_poller/` + `database_manager/` event-driven | ✅ Đã giải quyết |
 | G05 | ConversationSession | edge-agent Session giữ message history | ✅ Đã giải quyết |
 | G10 | Rule engine | 8 rules (R01-R08 + R09 missing data) | ✅ Đã giải quyết |
-| G11 | Deploy guide | `doc/system-design.md` + module docs | ✅ Đã giải quyết |
+| G11 | Deploy guide | `docs/System/system-design.md` + module docs | ✅ Đã giải quyết |
+| — | ESP32 firmware | 3 nodes: sensor, actuator, LoRa gateway | ✅ Đã giải quyết |
 
 ### Còn lại
 
 | # | Gap | Mức độ | Ghi chú |
 |---|-----|--------|---------|
-| G06 | AES-256 | 🟠 Trung bình | Protocol thiết kế có flag Encrypted, chưa code |
-| G07 | OTA firmware | 🟠 Trung bình | Chưa có firmware ESP32 |
+| G06 | AES-256 | 🟠 Trung bình | LoRa payload chưa mã hóa |
+| G07 | OTA firmware | 🟠 Trung bình | Update ESP32 từ xa qua LoRa |
 | G08 | Web UI | 🟢 Thấp | MCP HTTP endpoint sẵn sàng, cần frontend |
 | G09 | Scheduler | 🟡 Trung bình | Lịch tưới tự động chưa triển khai |
 | G12-G18 | ML models | 🟢 Thấp | LightGBM, LSTM-TCN, ONNX chưa tích hợp |
-| — | ESP32 firmware | 🟡 Trung bình | Chưa có firmware code trong repo |
 | — | Tests | 🟡 Trung bình | Chưa có test suite chính thức |
+| — | Mobile App | 🟢 Thấp | React Native app chưa phát triển |
 
 ---
 
