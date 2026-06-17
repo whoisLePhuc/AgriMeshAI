@@ -17,6 +17,7 @@ class AdapterResult:
     success: bool
     data: Any = None
     error: str | None = None
+    is_io_error: bool = False  # True = I/O failure (disconnect), False = transient (timeout)
 
     @classmethod
     def ok(cls, data: Any = None) -> AdapterResult:

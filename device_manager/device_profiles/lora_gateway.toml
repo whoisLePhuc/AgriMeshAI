@@ -1,0 +1,102 @@
+# LoRa Gateway — UART ↔ LoRa Mesh Bridge
+# Communicates via AT commands over serial (115200 baud)
+
+[device]
+name = "lora_gateway"
+description = "LoRa Gateway — bridges Edge Gateway to LoRa mesh network"
+
+[connection]
+protocol = "serial_at"     # uses SerialATAdapter
+port = "/dev/ttyUSB0"
+baud_rate = 115200
+timeout_ms = 3000
+
+# ── Tools: AT commands exposed as MCP tools ───────────────────────
+
+[[tools]]
+name = "get_temperature"
+description = "Get temperature from a sensor node (with 90s cache)"
+command = "AT+GET_TEMP={node_id}"
+[tools.params.node_id]
+type = "int"
+description = "Sensor node ID (1-255)"
+required = true
+min = 1
+max = 255
+[tools.returns]
+type = "number"
+unit = "celsius"
+
+[[tools]]
+name = "get_humidity"
+description = "Get humidity from a sensor node (with 90s cache)"
+command = "AT+GET_TEMP={node_id}"
+[tools.params.node_id]
+type = "int"
+description = "Sensor node ID (1-255)"
+required = true
+min = 1
+max = 255
+[tools.returns]
+type = "number"
+unit = "percent"
+
+[[tools]]
+name = "set_relay"
+description = "Control relay on actuator node"
+command = "AT+SET_RELAY={node_id},{relay_id},{state},{duration_s}"
+[tools.params.node_id]
+type = "int"
+description = "Actuator node ID (1-255)"
+required = true
+min = 1
+max = 255
+[tools.params.relay_id]
+type = "int"
+description = "Relay channel (0-3)"
+required = true
+min = 0
+max = 3
+[tools.params.state]
+type = "int"
+description = "0=OFF, 1=ON"
+required = true
+min = 0
+max = 1
+[tools.params.duration_s]
+type = "int"
+description = "Auto-off duration in seconds (0=indefinite, max 1800)"
+required = false
+min = 0
+max = 1800
+default = 0
+[tools.returns]
+type = "string"
+
+[[tools]]
+name = "ping_node"
+description = "Check if a node is alive"
+command = "AT+PING={node_id}"
+[tools.params.node_id]
+type = "int"
+description = "Node ID to ping"
+required = true
+min = 0
+max = 255
+[tools.returns]
+type = "string"
+
+[[tools]]
+name = "list_nodes"
+description = "List all known LoRa mesh nodes"
+command = "AT+LIST_NODES"
+[tools.returns]
+type = "string"
+
+[recording]
+enabled = false     # LoRa Gateway doesn't need polling — sensor nodes push
+
+[health]
+check_command = "AT+PING=0"
+expected = "+PONG:0"
+interval_ms = 30000
