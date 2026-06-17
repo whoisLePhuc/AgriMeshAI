@@ -1,0 +1,1 @@
+"""AgriMeshAI — Edge Gateway."""
