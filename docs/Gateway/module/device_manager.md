@@ -49,7 +49,7 @@ device_manager/
 
 ### Luồng dữ liệu
 
-![alt text](../assets/device_manager.png)
+![alt text](../../assets/device_manager.png)
 
 ```
 file.toml → profile_parser → DeviceModel
@@ -118,6 +118,7 @@ class DiscoveryResult
 |----------|-------|
 | `mock` | `MockAdapter` |
 | `serial` | `SerialAdapter` |
+| `serial_at` | `SerialATAdapter` |
 | `mqtt` | `MQTTAdapter` |
 
 **Error collection:** Profile lỗi không fail-fast — lỗi được collect vào `DiscoveryResult.errors`,

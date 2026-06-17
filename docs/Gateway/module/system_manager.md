@@ -178,11 +178,11 @@ class SystemManager:
 |-----------|-------|------|
 | `event_bus` | `EventBus` | `event_bus/bus.py` |
 | `event_queue` | `EventQueueManager` | `event_bus/manager.py` |
-| `store` | `ReadingStore` | `recorder/store.py` |
+| `store` | `ReadingStore` | `database_manager/store.py` |
 | `device_manager` | `DeviceManager` | `device_manager/manager.py` |
 | `rule_engine` | `RuleEngine` | `rule_engine/engine.py` |
 | `notifier` | `NotifierManager` | `notifier/manager.py` |
-| `fleet` | `FleetTools` | `mcp_server/gateway/fleet.py` |
+| `fleet` | `FleetTools` | `mcp_server/fleet.py` |
 
 ---
 
