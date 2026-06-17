@@ -9,6 +9,7 @@ from utils.adapters.base import BaseAdapter
 from utils.adapters.mock import MockAdapter
 from utils.adapters.mqtt import MQTTAdapter
 from utils.adapters.serial import SerialAdapter
+from utils.adapters.serial_at import SerialATAdapter
 from device_manager.model import DeviceModel
 from device_manager.profile_parser import ProfileError, parse_profile
 
@@ -17,6 +18,7 @@ _ADAPTER_REGISTRY: dict[str, type[BaseAdapter]] = {
     "mock": MockAdapter,
     "mqtt": MQTTAdapter,
     "serial": SerialAdapter,
+    "serial_at": SerialATAdapter,
 }
 
 
