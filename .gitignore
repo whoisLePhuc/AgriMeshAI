@@ -224,3 +224,26 @@ data/
 
 # Migration backup
 _backup/
+
+# ── Central Server ──────────────────────────────────────────────────
+# Environment secrets
+.env
+!.env.example
+
+# SQLite databases (dev)
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# ── PlatformIO ─────────────────────────────────────────────────────
+.pio/
+
+# ── LLM models (local) ─────────────────────────────────────────────
+*.gguf
+*.bin
+!firmware/*.bin
