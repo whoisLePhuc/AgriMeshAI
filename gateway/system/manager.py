@@ -20,6 +20,7 @@ from notifier import NotifierManager
 from mcp_server.fleet import FleetTools
 from system.module import HealthStatus, Module
 from system.config import Config
+from ml_detector import MLDetector
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,14 @@ class SystemManager:
         )
         self.fleet = FleetTools(self.device_manager, self.store)
         self.database_manager = DatabaseManager(self.store, self.event_queue, self.event_bus)
+        self.ml_detector = MLDetector(
+            self.event_bus,
+            config={
+                "MovingAverageDetector": {"threshold_sigma": 3.0},
+                "RateOfChangeDetector": {"max_rate": 5.0},
+                "StuckSensorDetector": {"window_hours": 6.0},
+            },
+        )
 
     def register_module(self, name: str, module: Module) -> None:
         """Register an additional module (for extensions)."""
@@ -92,7 +101,11 @@ class SystemManager:
                 lambda **data: self.event_bus.emit("alert_triggered", **data),
             )
 
-            # 5. Start registered modules
+            # 5. ML detector (subscribes to reading_recorded events)
+            self.ml_detector.start()
+            logger.info("ML detector started")
+
+            # 6. Start registered modules
             for name, module in self._modules.items():
                 if hasattr(module, "start"):
                     await module.start()
@@ -125,6 +138,7 @@ class SystemManager:
             (self.device_manager.disconnect_all(), "device_manager"),
             (self.event_queue.stop(), "event_queue"),
             (self.store.close(), "store"),
+            (self.ml_detector.stop(), "ml_detector"),
         ]:
             try:
                 await step
@@ -147,6 +161,7 @@ class SystemManager:
             ("event_queue", self._check_queue()),
             ("rule_engine", self._check_rule_engine()),
             ("notifier", self._check_notifier()),
+            ("ml_detector", self._check_ml_detector()),
         ]
         for name, coro in checks:
             try:
@@ -188,6 +203,10 @@ class SystemManager:
     async def _check_notifier(self) -> HealthStatus:
         channels = self.notifier.channels if self.notifier else []
         return HealthStatus(healthy=len(channels) > 0, message=str(channels))
+
+    async def _check_ml_detector(self) -> HealthStatus:
+        det_attr = getattr(self, "ml_detector", None)
+        return HealthStatus(healthy=det_attr is not None, message=(str(det_attr._detectors) if det_attr else "none"))
 
     # ── Delegation methods ──
 
