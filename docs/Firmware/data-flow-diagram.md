@@ -16,11 +16,12 @@
 │ đọc temp │ seq       │→UART send  │:1,0,25.3 │ → _dispatch_line() │       │              │
 │ + hum    │ timestamp │            │          │ → cache_set()      │       │              │
 │ mỗi 60s  │ value f32 │            │          │ → on_temp_report   │       │              │
-└──────────┘           └────────────┘          │ → SQLite store      │       │              │
-                                                │ → EventBus emit     │       │              │
-                                                │   → RuleEngine      │       │              │
-                                                │   → Notifier        │       │              │
-```                                                └────────────────────┘       └──────────────┘
+└──────────┘           └────────────┘          │ → SQLite store     │       │              │
+                                               │ → EventBus emit    │       │              │
+                                               │   → RuleEngine     │       │              │
+                                               │   → Notifier       │       │              │
+                                                └────────────────────┘       └──────────────┘
+```
 
 **Chi tiết:**
 
@@ -57,7 +58,7 @@ User ──► MCP ──► SystemManager
             │       │   ◄──UART──│
             │       │   parse SEQ=42 → resolve pending Future
             │       │   → cache_set() → trả user
-            │ ◄──────│
+            │ ◄─────│
 ◄─ trả lời──│
 ```
 

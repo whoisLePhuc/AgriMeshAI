@@ -12,7 +12,7 @@
 | Sai baud rate | `stty -F /dev/ttyUSB0` | `stty -F /dev/ttyUSB0 115200` |
 | Sai port | `ls /dev/ttyUSB*` | Chọn đúng port |
 | Gateway chưa boot | Đèn LED trên ESP32? | Chờ 5s, reset |
-| USB disconnect | `dmesg \| grep tty` | Cắm lại USB |
+| USB disconnect | `dmesg &#124; grep tty` | Cắm lại USB |
 
 ## 2. Node không join mesh
 
