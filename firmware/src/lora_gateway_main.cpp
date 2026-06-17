@@ -34,7 +34,7 @@ enum PendState : uint8_t {
 };
 
 struct PendingReq {
-    uint8_t     seq;
+    uint16_t    seq;
     uint8_t     target_nid;
     AddressType target_addr;
     PendState   state;
@@ -42,7 +42,7 @@ struct PendingReq {
 };
 
 struct HBPending {
-    uint8_t  seq;
+    uint16_t seq;
     uint8_t  count;       // actuators pinged
     uint8_t  responded;   // PONGs received
     uint32_t started;
@@ -66,7 +66,7 @@ static PendingReq                  pending[MAX_PENDING];
 static HBPending                   hb_pending;
 static uint32_t                    last_hb_ms;
 static uint32_t                    last_tx_ms;
-static uint8_t                     hb_seq = 1;
+static uint16_t                    hb_seq = 1;
 
 // ── Forward declarations ─────────────────────────────────────────
 
@@ -80,21 +80,21 @@ static void free_pending(int idx);
 static int  find_pending(PendState state, AddressType addr);
 static void uart_send(const char* buf);
 static void reap_pending();
-static void send_error(uint8_t code, const char* msg, uint8_t seq);
-static uint8_t parse_seq(const char* line);
+static void send_error(uint8_t code, const char* msg, uint16_t seq);
+static uint16_t parse_seq(const char* line);
 
 // ══════════════════════════════════════════════════════════════════
 // Helpers
 // ══════════════════════════════════════════════════════════════════
 
-static uint8_t parse_seq(const char* line) {
+static uint16_t parse_seq(const char* line) {
     const char* p = line;
     while (*p) {
         if (p[0] == 'S' && p[1] == 'E' && p[2] == 'Q' && p[3] == '=') {
             p += 4;
             if (*p < '0' || *p > '9') return 0;
-            uint8_t seq = 0;
-            while (*p >= '0' && *p <= '9') seq = seq * 10 + (*p++ - '0');
+            uint16_t seq = 0;
+            while (*p >= '0' && *p <= '9') seq = (uint16_t)(seq * 10 + (*p++ - '0'));
             return seq;
         }
         p++;
@@ -102,7 +102,7 @@ static uint8_t parse_seq(const char* line) {
     return 0;
 }
 
-static void send_error(uint8_t code, const char* msg, uint8_t seq) {
+static void send_error(uint8_t code, const char* msg, uint16_t seq) {
     char buf[64];
     int n = at_fmt_error(buf, sizeof(buf), code, msg, seq);
     if (n > 0) {
@@ -270,8 +270,7 @@ void loop() {
     // Heartbeat reaper
     if (hb_pending.waiting && (now - hb_pending.started > PEND_TIMEOUT_MS)) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "+HB:%d,%d/%d,SEQ=%d\r\n",
-                 hb_pending.responded, hb_pending.count, hb_pending.seq);
+        at_fmt_hb(buf, sizeof(buf), hb_pending.responded, hb_pending.count, hb_pending.seq);
         uart_send(buf);
         hb_pending.waiting = false;
     }
@@ -325,7 +324,6 @@ static void handle_command(const char* line) {
         if (idx < 0) {
             send_error(AT_ERR_NODE_NOT_FOUND, "not found", seq); return;
         }
-        duration *= 1000; // seconds → ms
         if (duration > MAX_ON_DURATION_MS) duration = MAX_ON_DURATION_MS;
 
         int p = alloc_pending();
@@ -387,7 +385,7 @@ static void handle_command(const char* line) {
             hb_pending.waiting   = true;
         } else {
             char ob[48];
-            snprintf(ob, sizeof(ob), "+HB:0,0/0,SEQ=%d\r\n", seq);
+            at_fmt_hb(ob, sizeof(ob), 0, 0, seq);
             uart_send(ob);
         }
         return;
