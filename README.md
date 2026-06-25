@@ -35,7 +35,7 @@ The platform integrates:
 
 ## System Architecture
 
-![alt text](docs/assets/system_architecture.png)
+![alt text](6.Docs/assets/system_architecture.png)
 
 ---
 
