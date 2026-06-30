@@ -13,6 +13,9 @@ from typing import Any
 
 from .base import AlertData, BaseDetector
 
+from collections import deque
+from typing import Any
+
 
 class RateOfChangeDetector(BaseDetector):
     """Detect rapid value changes via linear regression slope.
@@ -37,6 +40,16 @@ class RateOfChangeDetector(BaseDetector):
         # key=(node,sensor) → deque[(timestamp, value)]
         self._buffers: dict[tuple[int, int], deque[tuple[float, float]]] = {}
 
+    def reconfigure(self, params: dict[str, Any]) -> None:
+        """Apply new config at runtime."""
+        super().reconfigure(params)
+        if "window_minutes" in params:
+            self._window_s = float(params["window_minutes"]) * 60.0
+        if "max_rate" in params:
+            self._max_rate = float(params["max_rate"])
+        if "min_samples" in params:
+            self._min_samples = int(params["min_samples"])
+
     def on_reading(self, node_id: int, sensor_id: int, value: float,
                    timestamp: float | None = None) -> AlertData | None:
         import time
@@ -53,6 +66,7 @@ class RateOfChangeDetector(BaseDetector):
             buf.popleft()
 
         buf.append((ts, value))
+        self._check_buffer_size(key, len(buf))
 
         if len(buf) < self._min_samples:
             return None

@@ -41,6 +41,16 @@ class StuckSensorDetector(BaseDetector):
         # track how long the sensor has been stuck (re-entrant check)
         self._stuck_since: dict[tuple[int, int], float] = {}
 
+    def reconfigure(self, params: dict[str, Any]) -> None:
+        """Apply new config at runtime."""
+        super().reconfigure(params)
+        if "window_hours" in params:
+            self._window_s = float(params["window_hours"]) * 3600.0
+        if "threshold_var" in params:
+            self._threshold_var = float(params["threshold_var"])
+        if "min_samples" in params:
+            self._min_samples = int(params["min_samples"])
+
     def on_reading(self, node_id: int, sensor_id: int, value: float,
                    timestamp: float | None = None) -> AlertData | None:
         import time
@@ -56,6 +66,7 @@ class StuckSensorDetector(BaseDetector):
             buf.popleft()
 
         buf.append((ts, value))
+        self._check_buffer_size(key, len(buf))
 
         if len(buf) < self._min_samples:
             self._stuck_since.pop(key, None)

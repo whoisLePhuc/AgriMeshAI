@@ -16,6 +16,11 @@ from typing import Any
 
 from .base import AlertData, BaseDetector
 
+import math
+import time
+from collections import deque
+from typing import Any
+
 
 class MovingAverageDetector(BaseDetector):
     """Detect deviation from rolling average baseline.
@@ -40,6 +45,16 @@ class MovingAverageDetector(BaseDetector):
         # buffers: key=(node_id, sensor_id) → deque[float] (most recent first)
         self._buffers: dict[tuple[int, int], deque[float]] = {}
 
+    def reconfigure(self, params: dict[str, Any]) -> None:
+        """Apply new config at runtime."""
+        super().reconfigure(params)
+        if "window_size" in params:
+            self._window_size = int(params["window_size"])
+        if "threshold_sigma" in params:
+            self._threshold_sigma = float(params["threshold_sigma"])
+        if "min_samples" in params:
+            self._min_samples = int(params["min_samples"])
+
     def on_reading(self, node_id: int, sensor_id: int, value: float,
                    timestamp: float | None = None) -> AlertData | None:
         key = (node_id, sensor_id)
@@ -49,6 +64,12 @@ class MovingAverageDetector(BaseDetector):
             self._buffers[key] = buf
 
         buf.appendleft(value)
+        if len(buf) > self._window_size * 1.1:
+            logger = __import__("logging").getLogger(__name__)
+            logger.warning(
+                "MovingAverageDetector buffer %s exceeds window_size %d by >10%%",
+                key, self._window_size,
+            )
 
         if len(buf) < self._min_samples:
             return None

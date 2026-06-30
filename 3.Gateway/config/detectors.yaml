@@ -1,0 +1,19 @@
+# Statistical Detector Configuration
+# Each detector has its own parameter namespace under the class name.
+# Changes can be applied at runtime via EventBus `config_updated` event.
+# Restart gateway to pick up changes from this file.
+
+MovingAverageDetector:
+  window_size: 200        # Number of readings in sliding window (min: 10)
+  threshold_sigma: 3.0    # Stddev threshold for anomaly (lower = more sensitive)
+  min_samples: 10         # Minimum readings before detection activates
+
+RateOfChangeDetector:
+  window_minutes: 60      # Lookback window in minutes
+  max_rate: 5.0           # Max acceptable change per hour (units/h)
+  min_samples: 5          # Minimum data points for linear regression
+
+StuckSensorDetector:
+  window_hours: 6.0       # Lookback window in hours
+  threshold_var: 0.005    # Max variance before considering sensor stuck
+  min_samples: 10         # Minimum readings before checking

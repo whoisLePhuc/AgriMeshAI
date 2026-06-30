@@ -81,6 +81,39 @@ class ReadingStore:
             await self._db.close()
             self._db = None
 
+    async def get_history_for_enrichment(
+        self,
+        device_id: str,
+        sensor_id: str,
+        hours: int = 24,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        """Return last N hours of readings for enrichment context.
+
+        Returns a list of dicts with keys: timestamp, value, unit.
+        Limited to ``limit`` rows (default 1000) for prompt size control.
+        """
+        db = self._conn()
+        cutoff = time.time() - (hours * 3600)
+        cursor = await db.execute(
+            """
+            SELECT timestamp, value, unit
+            FROM readings
+            WHERE device_id = ?
+              AND sensor_id = ?
+              AND timestamp >= ?
+              AND downsampled = 0
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (device_id, sensor_id, cutoff, limit),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {"timestamp": r[0], "value": r[1], "unit": r[2]}
+            for r in rows
+        ]
+
     def _conn(self) -> aiosqlite.Connection:
         if self._db is None:
             raise RuntimeError("store not initialized — call init() first")

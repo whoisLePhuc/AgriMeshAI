@@ -21,6 +21,7 @@ from mcp_server.fleet import FleetTools
 from system.module import HealthStatus, Module
 from system.config import Config
 from ml_detector import MLDetector
+from ml_detector.enrichment import EnrichmentPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,10 @@ class SystemManager:
                 "RateOfChangeDetector": {"max_rate": 5.0},
                 "StuckSensorDetector": {"window_hours": 6.0},
             },
+        )
+        self.enrichment = EnrichmentPipeline(
+            store=self.store,
+            llm_api_url="http://100.125.217.6:11434/v1",
         )
 
     def register_module(self, name: str, module: Module) -> None:
@@ -103,7 +108,14 @@ class SystemManager:
 
             # 5. ML detector (subscribes to reading_recorded events)
             self.ml_detector.start()
+            # Wire config_updated → MLDetector
+            self.event_bus.on("config_updated", self.ml_detector._handle_config_updated)
             logger.info("ML detector started")
+
+            # 5b. Enrichment pipeline
+            self.enrichment.start()
+            self.event_bus.on("alert_triggered", self._on_alert_for_enrichment)
+            logger.info("EnrichmentPipeline started")
 
             # 6. Start registered modules
             for name, module in self._modules.items():
@@ -139,6 +151,7 @@ class SystemManager:
             (self.event_queue.stop(), "event_queue"),
             (self.store.close(), "store"),
             (self.ml_detector.stop(), "ml_detector"),
+            (self.enrichment.stop(), "enrichment"),
         ]:
             try:
                 await step
@@ -207,6 +220,23 @@ class SystemManager:
     async def _check_ml_detector(self) -> HealthStatus:
         det_attr = getattr(self, "ml_detector", None)
         return HealthStatus(healthy=det_attr is not None, message=(str(det_attr._detectors) if det_attr else "none"))
+
+    async def _on_alert_for_enrichment(self, **data: object) -> None:
+        """Forward alert_triggered events to the enrichment pipeline."""
+        raw = data.get("value", 0)
+        try:
+            val = float(raw) if raw is not None else 0.0  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            val = 0.0
+        self.enrichment.enqueue(
+            alert_id=hash(str(data)),
+            device_id=str(data.get("device_id", "")),
+            sensor_id=str(data.get("sensor_id", "")),
+            severity=str(data.get("severity", "WARNING")),
+            value=val,
+            message=str(data.get("message", "")),
+            rule_id=str(data.get("rule_id", "")),
+        )
 
     # ── Delegation methods ──
 
