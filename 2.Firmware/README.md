@@ -75,26 +75,46 @@ if (mesher->IsReadyToSend()) {
 AddressType my_addr = mesher->GetNodeAddress();
 ```
 
-## Giao thức (byte payload)
+## Giao thức (byte payload — struct đóng gói, little-endian)
 
-### Sensor → Gateway
-```
-byte[0]: sensor_id (0=temp, 1=hum, 2=moisture, 3=light)
-byte[1..4]: value (float32, little-endian)
-```
+Các message được đóng gói dưới dạng C struct (packed), không có padding.
+Xem định nghĩa đầy đủ tại `lib/mesh_protocol/mesh_types.h`.
 
-### Gateway → Actuator
+### SensorReading (12 bytes) — Sensor → Gateway
 ```
-byte[0]: relay_id (0-3)
-byte[1]: command (0=OFF, 1=ON, 2=TOGGLE)
-byte[2..5]: duration_ms (uint32, little-endian, 0=indefinite)
-```
-
-### Actuator ACK → Gateway
-```
-byte[0]: relay_id
-byte[1]: state (0=OFF, 1=ON)
-byte[2..5]: reserved
+byte[0]:  type       = 0x01 (MSG_SENSOR_DATA)
+byte[1]:  sensor_id  (0=temp, 1=hum, 2=moisture, 3=light, 4=battery)
+byte[2..3]: seq      (uint16_t, sequence number 0-65535)
+byte[4..7]: timestamp (uint32_t, epoch seconds)
+byte[8..11]: value   (float32, IEEE 754 little-endian)
 ```
 
-Gateway address: `0` (tất cả node gửi về 0).
+### RelayCmdPacket (7 bytes) — Gateway → Actuator
+```
+byte[0]: type       = 0x10 (MSG_RELAY_CMD)
+byte[1]: relay_id   (0-3)
+byte[2]: cmd        (0=OFF, 1=ON, 2=TOGGLE)
+byte[3..6]: duration_ms (uint32, 0=indefinite, >0=auto-off, max 1.800.000ms)
+```
+
+### RelayAck (3 bytes) — Actuator → Gateway
+```
+byte[0]: type       = 0x11 (MSG_RELAY_ACK)
+byte[1]: relay_id   (0-3)
+byte[2]: state      (0=OFF, 1=ON)
+```
+
+### Announce (3 bytes) — Node → Gateway (join/rejoin)
+```
+byte[0]: type      = 0x02 (MSG_ANNOUNCE)
+byte[1]: node_type (0=sensor, 1=actuator)
+byte[2]: fw_ver    (packed: 0x10 = v1.0)
+```
+
+### Pong (3 bytes) — Node → Gateway
+```
+byte[0]: type         = 0x21 (MSG_PONG)
+byte[1..2]: uptime_hours (uint16_t)
+```
+
+Gateway address: `0x0001` (tất cả node gửi về `GATEWAY_LORA_ADDR` = 1).
