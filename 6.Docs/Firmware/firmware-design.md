@@ -5,7 +5,7 @@
 
 ---
 
-> **Ghi chú:** Firmware hiện tại đã triển khai 3 node trong `firmware/src/`: sensor, actuator, LoRa gateway. Phần mô tả dưới đây phản ánh code thực tế.
+> **Ghi chú:** Firmware hiện tại đã triển khai 3 node trong `2.Firmware/src/`: sensor, actuator, LoRa gateway. Phần mô tả dưới đây phản ánh code thực tế.
 
 ## 1. LoRa Gateway — `firmware/src/lora_gateway_main.cpp`
 
@@ -246,3 +246,150 @@ check_timers():
 | 15 | Relay 1 | Van solenoid |
 | 16 | Relay 2 | Quạt |
 | 17 | Relay 3 | Đèn |
+
+---
+
+## 6. Tính năng bổ sung (Cross-Cutting)
+
+### 6.1. RingBuf — ISR-Safe UART RX Buffer
+
+**File:** `lib/mesh_protocol/ringbuf.h`
+
+Dùng trong LoRa Gateway (`lora_gateway_main.cpp`) để đọc UART từ Edge (Jetson Nano)
+mà không block IRQ. Buffer vòng 1024 bytes, ISR-safe.
+
+```
+Hardware UART RX → ISR (serialEvent) → ringbuf.push(byte)
+                        ↓
+              main loop → ringbuf.read_line(buf, 256) → handle_command(buf)
+```
+
+Đặc điểm:
+- `push()` gọi từ ISR context — không blocking, không malloc
+- `read_line()` gọi từ main loop — trả về dòng kết thúc bằng `\r\n`
+- Overflow: push trả về false nếu buffer đầy, không crash
+
+### 6.2. Retry Queue — Sensor Node
+
+**File:** `sensor_main.cpp:50-113`
+
+Sensor node có cơ chế retry khi gửi LoRa thất bại:
+
+```
+safe_send(dst, payload):
+    mesher->Send() → nếu fail → push vào retry_queue (max 20 items)
+
+flush_retry_queue():
+    pop front → mesher->Send() → nếu fail → retry (tối đa 3 lần)
+                                  → nếu hết retry → drop packet
+```
+
+- Queue được bảo vệ bởi `queue_mux` spinlock (dual-core safety)
+- Mỗi packet nhớ destination address riêng
+- Một packet được retry mỗi vòng loop (100ms间隔)
+
+### 6.3. Watchdog Timer (WDT)
+
+**File:** Cả 3 firmware — `esp_task_wdt_init(WDT_TIMEOUT_S, true)`
+
+| Node | Timeout | Hành vi khi timeout |
+|------|---------|-------------------|
+| Sensor | 30s | ESP restart |
+| Actuator | 30s | ESP restart (quan trọng: tránh relay kẹt ON) |
+| LoRa Gateway | Không có | (phụ thuộc UART từ Edge) |
+
+WDT được reset mỗi vòng loop qua `esp_task_wdt_reset()`. Nếu loop treo
+(deadlock, infinite loop, exception), WDT sẽ reset ESP trong 30s.
+
+### 6.4. Heartbeat Sweep — LoRa Gateway
+
+**File:** `lora_gateway_main.cpp:249-276`
+
+Gateway tự động PING tất cả actuator nodes mỗi 120s (`HEARTBEAT_INTERVAL_MS`):
+
+```
+loop():
+    if now - last_hb_ms >= 120s:
+        for each actuator in node_table:
+            mesher->Send(actuator, MSG_PING)
+        hb_pending = {seq, count, responded=0, started=now}
+    
+    if hb_waiting && now - started > 5s:
+        uart_send("+HB:responded/total,SEQ=seq")
+```
+
+Kết quả `+HB` được gửi lên Edge để monitoring — cho biết bao nhiêu actuator còn sống.
+
+### 6.5. MAX_NODES = 20 — Node Table Limit
+
+**File:** `lora_gateway_main.cpp:21`
+
+LoRa Gateway giới hạn routing table ở 20 nodes:
+
+```cpp
+#define MAX_NODES 20
+static NodeEntry node_table[MAX_NODES];
+```
+
+Khi table đầy, node mới join bị từ chối: `+ERR:4,table full addr=0x...`.
+Nếu cần support >20 nodes, tăng hằng số này và kiểm tra RAM.
+
+### 6.6. Pending Request Slots = 4
+
+**File:** `lora_gateway_main.cpp:22`
+
+Gateway chỉ xử lý tối đa 4 request đồng thời:
+
+```cpp
+#define MAX_PENDING 4
+PendingReq pending[MAX_PENDING];
+// States: PEND_IDLE, PEND_PING, PEND_TEMP, PEND_ACK, PEND_PONG
+```
+
+Mỗi slot có timeout 5s (`PEND_TIMEOUT_MS`). Hết hạn → `+ERR:2,timeout`.
+Nếu cả 4 slot đều busy → `+ERR:4,pending full`.
+
+### 6.7. Auto-Off Safety Timer — Actuator
+
+**File:** `actuator_main.cpp:174-187`
+
+Relay có auto-off timer để tránh kẹt ON vĩnh viễn:
+
+```
+check_timers():
+    for each relay:
+        if relay.on && auto_off_ms > 0:
+            if now - on_since >= auto_off_ms:
+                set_relay(i, OFF)
+                send_ack(i, 0)
+```
+
+- Max duration: 30 phút (`MAX_ON_DURATION_MS`)
+- Wrap-around an toàn: dùng `(int32_t)` cast
+- Safety: hoạt động ngay cả khi mất kết nối LoRa
+
+### 6.8. Dual-Core Spinlock Protection
+
+**File:** `sensor_main.cpp:59-63` và `lora_gateway_main.cpp` (queue_mux)
+
+ESP32-S3 là dual-core. Biến chia sẻ giữa LoRaMesher callback task
+(chạy trên core khác) và main loop được bảo vệ bởi spinlock:
+
+```cpp
+// Sensor node — ping_src flag
+static portMUX_TYPE ping_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Callback (ISR context):
+portENTER_CRITICAL_ISR(&ping_mux);
+ping_src = src;
+flag_ping_valid = true;
+portEXIT_CRITICAL_ISR(&ping_mux);
+
+// Main loop:
+portENTER_CRITICAL(&ping_mux);
+if (flag_ping_valid) { ... flag_ping_valid = false; }
+portEXIT_CRITICAL(&ping_mux);
+```
+
+Spinlock đảm bảo atomic read-modify-write — `volatile` không đủ an toàn
+trên Xtensa dual-core.

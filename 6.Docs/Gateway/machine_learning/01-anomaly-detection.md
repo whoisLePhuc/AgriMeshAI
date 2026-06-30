@@ -1,217 +1,174 @@
-# Anomaly Detection — MLDetector v1
+# Statistical Anomaly Detection — MLDetector v2
 
-> **Trạng thái:** ✅ Đã triển khai trên `feature/machine_learning`
-> **Module:** `ml_detector/`
-> **Branch:** `feature/machine_learning`
+> **Trạng thái:** ✅ Đã triển khai
+> **Module:** `ml_detector/` trong Gateway
+> **Branch:** `develop`
 
 ---
 
 ## Vai trò trong hệ thống
 
-Hệ thống có 3 tầng phát hiện bất thường:
+Hệ thống có 2 tầng phát hiện bất thường đã triển khai:
 
 ```
-Tầng 1 — RuleEngine (cứng)        R01-R09  ✅ config/rules.yaml
-  Threshold tuyệt đối: temp > 40°C → CRITICAL
+Tầng 1 — RuleEngine (ngưỡng tuyệt đối)    R01-R08  ✅ config/rules.yaml
+  Threshold cứng: temp > 40°C → CRITICAL, humidity < 30% → WARNING
 
-Tầng 2 — MLDetector v1 (thống kê)  M01-M03  ✅ ml_detector/
+Tầng 2 — MLDetector (thống kê động)        M01-M03  ✅ ml_detector/
   Baseline động, phát hiện deviation, stuck sensor
 
-Tầng 3 — Phân tích sâu (tương lai)            ❌ Chưa triển khai
-  Isolation Forest, LightGBM, Cross-correlation
+Tầng 3 — ML thực sự (tương lai)                       ❌ Chưa triển khai
+  Isolation Forest, LightGBM, LSTM-TCN
 ```
 
-## Kiến trúc module
+**Lưu ý:** Các detector hiện tại là **statistical algorithms**, không phải ML.
+Chạy online trên Gateway, không cần training, không có model file.
+
+---
+
+## Các Detector
+
+### M01 — MovingAverageDetector
+
+**File:** `ml_detector/detectors/moving_average.py`
+
+Phát hiện độ lệch so với rolling baseline. Duy trì sliding window
+per (node_id, sensor_id), tính mean và stddev, flag khi giá trị mới
+vượt quá `threshold_sigma` lần stddev.
 
 ```
-EventBus("reading_recorded")
+Ví dụ: Nhiệt độ ổn định ~30°C trong 200 readings
+       → mean ≈ 30.0, stddev ≈ 0.5
+       → Giá trị 35.0 → sigma = |35-30|/0.5 = 10.0 > 3.0 → ALERT
+```
+
+**Parameters:**
+
+| Param | Default | Range | Ý nghĩa |
+|-------|---------|-------|---------|
+| `window_size` | 200 | 10–10000 | Số readings trong sliding window |
+| `threshold_sigma` | 3.0 | 1.0–5.0 | Ngưỡng σ — thấp = nhạy hơn |
+| `min_samples` | 10 | 3–100 | Số readings tối thiểu trước khi detect |
+
+### M02 — RateOfChangeDetector
+
+**File:** `ml_detector/detectors/rate_of_change.py`
+
+Phát hiện thay đổi đột ngột qua linear regression slope.
+Tính độ dốc (units/hour) trên sliding window, flag khi |slope| > max_rate.
+
+```
+Ví dụ: Nhiệt độ tăng từ 30→40°C trong 30 phút
+       → slope = 20°C/h > max_rate = 5°C/h → ALERT
+```
+
+**Parameters:**
+
+| Param | Default | Range | Ý nghĩa |
+|-------|---------|-------|---------|
+| `window_minutes` | 60 | 5–1440 | Cửa sổ thời gian (phút) |
+| `max_rate` | 5.0 | 0.1–50 | Ngưỡng tốc độ thay đổi (units/h) |
+| `min_samples` | 5 | 3–100 | Số điểm tối thiểu cho regression |
+
+### M03 — StuckSensorDetector
+
+**File:** `ml_detector/detectors/stuck_sensor.py`
+
+Phát hiện cảm biến bị kẹt (giá trị không đổi trong thời gian dài).
+Tính variance trên window, flag khi variance ≈ 0 trong >2 giờ.
+
+```
+Ví dụ: Cảm biến độ ẩm báo 65% liên tục trong 6 giờ
+       → variance ≈ 0, stuck > 2h → ALERT
+```
+
+**Parameters:**
+
+| Param | Default | Range | Ý nghĩa |
+|-------|---------|-------|---------|
+| `window_hours` | 6.0 | 1–48 | Cửa sổ thời gian (giờ) |
+| `threshold_var` | 0.005 | 0.0001–1.0 | Ngưỡng variance để coi là stuck |
+| `min_samples` | 10 | 3–1000 | Số điểm tối thiểu |
+| `cooldown_s` | 1800 | 0–86400 | Thời gian chờ giữa các alert (giây, mặc định 30 phút) |
+
+---
+
+## Runtime Configuration
+
+Tất cả parameters có thể thay đổi tại runtime qua EventBus `config_updated`:
+
+```python
+await event_bus.emit("config_updated", detector_name="moving_average",
+                      params={"threshold_sigma": 2.5})
+```
+
+- **Enable/disable:** `detector.disable("stuck_sensor")` / `detector.enable("stuck_sensor")`
+- **Health:** `detector.get_health()` → list[DetectorHealth] với name, status, alert_count
+- **Không cần restart** gateway
+
+---
+
+## Enrichment Pipeline
+
+Khi detector phát hiện bất thường, `EnrichmentPipeline` tự động:
+
+1. Query SQLite 24h gần nhất cho sensor đó
+2. Gắn historical context vào alert
+3. Gọi Ollama (Qwen2.5 7B) để giải thích bằng tiếng Việt
+4. Nếu Ollama offline → retry 3 lần (30s, 2min, 5min)
+
+Alert **không bao giờ** bị chờ enrichment.
+
+**File:** `ml_detector/enrichment.py`
+
+---
+
+## Event Flow
+
+```
+Sensor Reading
     │
     ▼
-MLDetector.on_reading(device_id, sensor_id, value)
-    │
-    ├──► M01: MovingAverageDetector
-    │       rolling window ±3σ → phát hiện deviation từ baseline
-    │
-    ├──► M02: RateOfChangeDetector  
-    │       linear regression slope → phát hiện thay đổi đột ngột
-    │
-    └──► M03: StuckSensorDetector
-            variance ≈ 0 → phát hiện cảm biến kẹt/hỏng
+DatabaseManager ghi SQLite
     │
     ▼
-EventBus("alert_triggered") ──► Notifier (giống RuleEngine)
-```
-
-Cả 3 detector đều là **online** — chạy trên từng reading, tự duy trì state buffer, không cần training.
-
----
-
-## M01: Moving Average ±3σ
-
-### Cách hoạt động
-
-Duy trì sliding window N giá trị gần nhất per (node_id, sensor_id).
-Khi có reading mới:
-
-1. Push vào buffer (size cấu hình, mặc định 200)
-2. Tính **mean** và **stddev** của window
-3. Nếu `|value - mean| / stddev > threshold_sigma` (mặc định 3.0) → anomaly
-
-### Cấu hình
-
-```python
-MovingAverageDetector({
-    "window_size": 200,      # số readings trong buffer
-    "threshold_sigma": 3.0,  # độ lệch chuẩn tối đa
-    "min_samples": 10,       # buffer tối thiểu trước khi check
-})
-```
-
-### Ví dụ
-
-```
-Baseline: 25°C ± 0.3°C (200 readings)
-Reading mới: 55°C
-Sigma = |55-25| / 0.3 = 85σ >> 3.0 → M01 WARNING
-```
-
-### Edge cases
-
-| Case | Xử lý |
-|------|-------|
-| stddev = 0 (all same values) | Bỏ qua — không thể tính sigma |
-| Chưa đủ min_samples | Bỏ qua |
-| Cooldown 5 phút | Ngăn trùng lặp alert trên cùng (node, sensor) |
-
----
-
-## M02: Rate of Change
-
-### Cách hoạt động
-
-Duy trì sliding window theo thời gian (timestamp). Khi có reading mới:
-
-1. Prune các entry cũ hơn `window_minutes`
-2. Push (timestamp, value)
-3. Fit **linear regression** (mean-normalized để tránh catastrophic cancellation)
-4. Nếu `|slope_per_hour| > max_rate` → anomaly
-
-### Cấu hình
-
-```python
-RateOfChangeDetector({
-    "window_minutes": 60,   # lookback window
-    "max_rate": 5.0,        # max change per hour (units/h)
-    "min_samples": 5,       # minimum points for regression
-})
-```
-
-### Numerical stability
-
-Timestamps là unix epoch (~1.7e9), `t²` ≈ 3e18. Regression với unix timestamps raw gây **catastrophic cancellation** (mất precision khi trừ 2 số rất lớn). Fix: chuẩn hóa bằng cách subtract mean(t) trước khi tính.
-
-```
-Denom = Σ(t-mean_t)²   # ← ổn định, không catastrophic cancellation
-Num   = Σ(t-mean_t)*(v-mean_v)
-Slope = Num / Denom
+EventBus.emit("reading_recorded", device_id, sensor_id, value)
+    │
+    ├──► RuleEngine (R01-R08)
+    │
+    └──► MLDetector._on_reading()
+            │
+            ├── MovingAverageDetector.on_reading()
+            ├── RateOfChangeDetector.on_reading()
+            └── StuckSensorDetector.on_reading()
+                │
+                ▼ (nếu phát hiện bất thường)
+            EventBus.emit("alert_triggered", ...)
+                │
+                ├──► NotifierManager → Console / Telegram / Webhook / SMS
+                │
+                └──► EnrichmentPipeline.enqueue()
+                        └── 24h context + LLM (best-effort)
 ```
 
 ---
 
-## M03: Stuck Sensor
+## So sánh với RuleEngine
 
-### Cách hoạt động
-
-Phát hiện sensor bị kẹt (giá trị không đổi trong thời gian dài).
-
-1. Duy trì buffer (timestamp, value) per (node, sensor)
-2. Nếu variance của toàn bộ buffer < `threshold_var` → stuck
-3. **Alert sau 2 tiếng** stuck liên tục (tránh false positive)
-4. Khi giá trị thay đổi → tự động unstuck
-
-### Cấu hình
-
-```python
-StuckSensorDetector({
-    "window_hours": 6.0,        # lookback window
-    "threshold_var": 0.005,     # max variance to consider stuck
-    "min_samples": 10,          # minimum points before checking
-})
-```
-
-### Ví dụ
-
-```
-Sensor đọc 25.0°C liên tục trong 150 phút
-→ variance ≈ 0 < 0.005 → stuck
-→ stuck_hours = 150/60 = 2.5h ≥ 2h → M03 WARNING
-"Sensor 1 temperature: stuck for 2.5h (variance=0.0000)"
-```
+| Tiêu chí | RuleEngine (R01-R08) | MLDetector (M01-M03) |
+|----------|---------------------|---------------------|
+| Loại | Threshold tuyệt đối | Statistical động |
+| Phát hiện | Nhiệt > 40°C | Tăng 5°C/h bất thường |
+| Baseline | Cố định (config) | Tự động (sliding window) |
+| Complexity | O(1) | O(window_size) |
+| Dependencies | Không | Không (thuần Python) |
+| Config | YAML file, cần restart | Runtime qua EventBus |
 
 ---
 
-## Tích hợp
+## Test Coverage
 
-### Vào SystemManager
-
-```python
-# system/manager.py
-from ml_detector import MLDetector
-
-class SystemManager:
-    def __init__(self, config):
-        ...
-        self.ml_detector = MLDetector(
-            event_bus=self.event_bus,
-            config={
-                "MovingAverageDetector": {"threshold_sigma": 3.0},
-                "RateOfChangeDetector": {"max_rate": 5.0},
-                "StuckSensorDetector": {"window_hours": 6.0},
-            },
-        )
-
-    async def start(self):
-        ...
-        self.ml_detector.start()
-
-    async def stop(self):
-        self.ml_detector.stop()
-```
-
-### Với Notifier
-
-Module `ml_detector` emit `alert_triggered` y hệt RuleEngine — Notifier xử lý như nhau:
-- `rule_id` prefix `M` (M01, M02, M03) phân biệt với Rule `R` (R01-R09)
-- Không cần sửa Notifier
-
----
-
-## Cấu trúc file
-
-```
-ml_detector/
-├── __init__.py                 # Export MLDetector
-├── detector.py                 # Orchestrator: subscribe → dispatch → emit
-└── detectors/
-    ├── __init__.py
-    ├── base.py                 # BaseDetector ABC + AlertData + cooldown
-    ├── moving_average.py       # M01: ±3σ adaptive baseline
-    ├── rate_of_change.py       # M02: linear regression slope
-    └── stuck_sensor.py         # M03: zero variance stuck detection
-```
-
----
-
-## Tổng hợp
-
-| Rule | Detector | Input | Output | Training |
-|------|----------|-------|--------|----------|
-| M01 | MovingAverage ±3σ | 1 reading | σ deviation từ baseline | ❌ Online |
-| M02 | RateOfChange | N readings | slope (units/h) | ❌ Online |
-| M03 | StuckSensor | N readings | variance ≈ 0 | ❌ Online |
-
-**Đặc điểm chung:**
-- Online — không cần training, không cần dữ liệu lịch sử
-- State per (node_id, sensor_id) — buffer riêng cho từng sensor
-- Cooldown — alert suppression 5-30 phút (configurable per detector)
-- Alert format — `alert_triggered` event tương thích Notifier
+- Unit tests: `tests/test_moving_average.py`, `tests/test_rate_of_change.py`,
+  `tests/test_stuck_sensor.py`, `tests/test_ml_detector.py`
+- Integration tests: `tests/integration/test_e2e_detection.py`
+- 44 unit + 11 integration tests — tất cả pass

@@ -123,4 +123,4 @@ Gateway → Edge: +NODE_ACK:OK\r\n
 | Timeout mỗi request | 2.0s | Chờ response từ Gateway |
 | Retry tối đa | 3 lần | Mỗi lần SEQ mới |
 | SEQ range | uint16_t (0-65535) | Wrap-around an toàn |
-| Pending slots | 32 | Tối đa request chờ response |
+| Pending slots | 4 | Tối đa request chờ response trên LoRa Gateway (giới hạn firmware) |

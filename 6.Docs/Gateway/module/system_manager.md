@@ -1,8 +1,8 @@
 # System Manager — Thiết kế module
 
 > **Module:** `system/`
-> **Phiên bản:** 1.0
-> **Ngày:** 12/06/2026
+> **Phiên bản:** 2.0
+> **Ngày:** 30/06/2026
 
 ---
 
@@ -316,11 +316,17 @@ def run_daemon(...):
 
 ## 9. Giới hạn
 
-- **Không có hot-reload** — thay đổi config cần restart
 - **Module registry chỉ start/stop** — chưa có dependency graph
 - **Health check đơn giản** — chưa có timeout, retry health check
 - **FleetTools phụ thuộc DeviceManager** — không thể dùng fleet riêng
 - **NotifierManager không có stop()** — chưa cleanup resources
+
+### ✅ Đã giải quyết (v2.0)
+
+- **Hot-reload detector config:** `config_updated` EventBus → MLDetector reconfigure params, enable/disable — không restart
+- **Health reporting:** `DetectorHealth` dataclass, `get_health()`, periodic `detector_health` event (60s)
+- **EnrichmentPipeline:** Tự động gắn 24h context + LLM explanation vào alert (best-effort)
+- **Stop sequence:** EnrichmentPipeline task được cancel sạch khi SystemManager stop
 
 ---
 

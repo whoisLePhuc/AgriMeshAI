@@ -1,6 +1,6 @@
 # THIẾT KẾ HỆ THỐNG
 ## AI Agent + MCP Server + LoRa Mesh — Nông Nghiệp Thông Minh
-**Phiên bản:** 5.0 (Gateway restructure) | **Ngày:** 17/06/2026 | **Quy mô:** POC / Vườn nhỏ — 1 người dùng, < 20 node
+**Phiên bản:** 6.0 (Statistical detection + enrichment) | **Ngày:** 30/06/2026 | **Quy mô:** 20–50 node cảm biến, 1+ người dùng
 
 ---
 
@@ -89,7 +89,7 @@ Hệ thống kết nối người nông dân với thiết bị cảm biến và
 │  │  │  └───────────────────────────────────────────────────────────┘  │  │  │
 │  │  │                                                                 │  │  │
 │  │  │  ┌───────────────────────────────────────────────────────────┐  │  │  │
-│  │  │  │  Adapters: Mock | Serial | SerialAT | MQTT               │  │  │  │
+│  │  │  │  Adapters: Mock | Serial | SerialAT | MQTT                │  │  │  │
 │  │  │  └───────────────────────────────────────────────────────────┘  │  │  │
 │  │  └─────────────────────────────────────────────────────────────────┘  │  │
 │  │                                                                       │  │
@@ -331,69 +331,51 @@ Gateway Daemon (mỗi 2 phút — HEARTBEAT_INTERVAL_MS)
 - Node OFFLINE > 2 giờ → push notification cảnh báo pin hoặc hỏng phần cứng.
 - AI Scheduled report (sáng/tối) tóm tắt trạng thái toàn bộ hệ thống.
 
-### 4.4. ML Inference — Anomaly Detection (24/7)
+### 4.4. Statistical Anomaly Detection (24/7)
 
-```
-Sensor stream ──[LoRa]──► Gateway Daemon
-                                │
-                                ▼
-                        ┌──────────────────┐
-                        │ SQLite           │
-                        │ (lưu mọi reading)│
-                        └────────┬─────────┘
-                                 │
-                          ┌──────┴──────────┐
-                          │ Univariate ML   │  ← chạy 24/7, ~10 MB RAM
-                          │ Moving Avg ±3σ  │
-                          │ Rate of Change  │
-                          │ Variance check  │
-                          └──────┬──────────┘
-                          │ score > ngưỡng?
-                    ┌──── yes ────┐  no → bỏ qua
-                    ▼
-          ┌──────────────────┐
-          │ Multivariate ML  │  ← Isolation Forest
-          │ (nếu đủ data)    │     ~30 MB RAM
-          └──────┬───────────┘
-                 │ score > ngưỡng?
-           ┌──── yes ────┐  no
-           ▼               ▼
-    ┌──────────────┐  ┌──────────────┐
-    │ Ghi alert    │  │ Bỏ qua       │
-    │ SQLite       │  └──────────────┘
-    └──────┬───────┘
-           │
-    ┌──────┴───────┐
-    │ Push         │
-    │ Telegram     │
-    └──────────────┘
-```
+> **Hiện trạng:** ✅ Đã triển khai (3 detectors)
+> **Module:** `ml_detector/`
 
-### 4.5. ML Inference — Predictive + Weather (định kỳ)
+**Luồng xử lý:**
 
-```
-AgriMeshAI Daemon (mỗi 15 phút)
+```text
+reading_recorded (EventBus)
     │
-    ├── [Predictive] ──► LightGBM
-    │   ├── Input: sensor history 7 ngày
-    │   ├── Output: độ ẩm dự báo 24h
-    │   └── Nếu predicted < threshold → gọi AI Agent đề xuất tưới
+    ▼
+MLDetector (orchestrator)
     │
-    ├── [Battery Predict] ──► Linear Regression
-    │   ├── Input: pin% 30 ngày
-    │   ├── Output: ngày còn lại
-    │   └── Nếu < 7 ngày → push "sắp hết pin"
+    ├── M01 — MovingAverageDetector (±σ baseline deviation)
+    │       Sliding window |value - mean| > σ × threshold → alert
     │
-    └── [Weather LSTM] ──► LSTM-TCN (ONNX)
-        ├── Input: 30 ngày gần nhất (từ SQLite)
-        ├── Output: 48h tới (temp, humidity, rain_prob)
-        └── Lưu vào SQLite bảng `weather_forecasts`
+    ├── M02 — RateOfChangeDetector (linear regression slope)
+    │       |slope_per_hour| > max_rate → alert
+    │
+    └── M03 — StuckSensorDetector (variance-based)
+            variance ≈ 0 trong >2h → alert
 
-AI Agent gọi:
-  MCP: get_weather_forecast_local()  → ưu tiên ML, fallback API
-  MCP: predict_soil_moisture()       → LightGBM
-  MCP: predict_battery_life()        → Linear Regression
+alert_triggered (EventBus) ──► Notifier Manager (4 channels)
+                                      │
+                                      ▼
+                              EnrichmentPipeline
+                              ├── 24h historical context (SQLite)
+                              └── LLM explanation (Qwen2.5) [best-effort]
 ```
+
+> Cả 3 detector đều là **statistical algorithm**, không phải ML. Chạy online, không cần training, không có model file.
+
+**Runtime config:** Enable/disable detector, tune params (threshold_sigma, max_rate, window_size) qua EventBus `config_updated` — không restart.
+
+**Health:** `DetectorHealth` dataclass, `get_health()`, periodic `detector_health` event (60s). Exception isolation: một detector crash không ảnh hưởng detector khác.
+
+### 4.5. Predictive + Weather Forecasting (Tương lai)
+
+> **Trạng thái:** ❌ Chưa triển khai
+
+Hiện tại codebase **không có** LightGBM, LSTM-TCN, Isolation Forest, ONNX Runtime, hay bất kỳ ML framework nào. Các mục dưới đây là tài liệu tham khảo cho Phase sau:
+
+- Dự đoán xu hướng (LightGBM, Linear Regression)
+- Dự báo thời tiết (LSTM-TCN / ONNX)
+- Phát hiện bất thường đa chiều (Isolation Forest)
 
 ---
 
@@ -747,65 +729,51 @@ Rules được định nghĩa trong `config/rules.yaml`, có thể hot-reload. A
 
 ---
 
-## 9. Machine Learning
+## 9. Phát Hiện Bất Thường — Statistical Detection
 
-> ⚠️ **Hiện trạng:** Các ML models dưới đây là thiết kế mục tiêu. Codebase hiện tại mới chỉ có statistical anomaly detection (baseline deviation ±σ qua SQLite) trong `ReadingStore.search_anomalies()`. LightGBM, LSTM-TCN, ONNX chưa được tích hợp.
+> **Hiện trạng:** ✅ Đã triển khai — 3 statistical detectors trong `ml_detector/`
 
-> 📖 **Tài liệu chi tiết từng tác vụ ML được mô tả trong thư mục `docs/Gateway/machine_learning/`:**
-> - [`01-anomaly-detection.md`](machine_learning/01-anomaly-detection.md) — Univariate + Multivariate Anomaly Detection
-> - [`02-predictive.md`](machine_learning/02-predictive.md) — Dự đoán sensor (độ ẩm, nhiệt, pin)
-> - [`03-weather-forecasting.md`](machine_learning/03-weather-forecasting.md) — Dự báo thời tiết LSTM-TCN từ NASA POWER
+### 9.1. Các Detector
 
-Hệ thống có 3 tầng xử lý. ML nằm giữa Rule Engine (đơn giản, cứng nhắc) và LLM (chậm, nặng):
+| ID | Detector | Phương pháp | Config |
+|----|----------|-------------|--------|
+| M01 | MovingAverage | Rolling window ±σ | window_size, threshold_sigma |
+| M02 | RateOfChange | Linear regression slope | window_minutes, max_rate |
+| M03 | StuckSensor | Variance-based | window_hours, threshold_var |
 
+Cả 3 detector đều là **statistical, không phải ML**. Chạy online trên Gateway, không cần training.
+
+### 9.2. Runtime Config
+
+- Enable/disable detector qua EventBus — không restart
+- Tune params runtime: `threshold_sigma`, `max_rate`, `window_size`
+- Health: `DetectorHealth` dataclass + periodic `detector_health` event (60s)
+- Exception isolation: crash không ảnh hưởng detector khác
+
+### 9.3. Enrichment Pipeline
+
+- `ml_detector/enrichment.py` — async queue (max 1000)
+- 24h historical context (SQLite) + LLM tiếng Việt (best-effort)
+- Offline retry: 3 lần (30s, 2min, 5min)
+- Alert **không bao giờ** bị chờ enrichment
+
+### 9.4. Các Module ML Tương Lai
+
+> **Trạng thái:** ❌ Chưa triển khai
+
+Codebase hiện tại **không có** LightGBM, LSTM-TCN, Isolation Forest, ONNX Runtime, PyTorch, TensorFlow hay bất kỳ ML framework nào. `requirements.txt` chỉ có: pydantic, click, aiosqlite, mcp, pyserial, paho-mqtt, openai, httpx, pyyaml, tomli.
+
+Tài liệu tham khảo cho Phase sau:
+- [`01-anomaly-detection.md`](../Gateway/machine_learning/01-anomaly-detection.md)
+- [`02-predictive.md`](../Gateway/machine_learning/02-predictive.md)
+- [`03-weather-forecasting.md`](../Gateway/machine_learning/03-weather-forecasting.md)
+
+### 9.5. Test Coverage
+
+- Unit tests: 44 (detectors, orchestrator, enrichment, config)
+- Integration tests: 11 (E2E flow, lifecycle, real Ollama)
+- Run: `python -m pytest tests/ tests/integration/ -v`
 ```
-┌──────────────────────────────────────────────────────────────┐
-│              BA TẦNG XỬ LÝ TRONG HỆ THỐNG                    │
-│                                                              │
-│  ┌─────────────────┬──────────────────┬──────────────────┐   │
-│  │   RULE ENGINE   │       ML         │       LLM        │   │
-│  │  (if/else)      │  (dự đoán, phát  │  (suy luận,      │   │
-│  │                 │  hiện bất thường)│   ngôn ngữ)      │   │
-│  ├─────────────────┼──────────────────┼──────────────────┤   │
-│  │ Nhanh (<1ms)    │ Dự đoán được     │ Linh hoạt        │   │
-│  │ Rẻ (0% CPU)     │ Nhẹ (<5% CPU)    │ Hiểu ngữ cảnh    │   │
-│  │ Cứng nhắc       │ Cần data huấn    │Chậm (5-30s)      │   │
-│  │ Không dự đoán   │   luyện          │ Nặng (>1GB)      │   │
-│  └─────────────────┴──────────────────┴──────────────────┘   │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### 9.1. Nguyên tắc chọn tác vụ cho ML
-
-| Nên dùng ML khi | Không nên dùng ML khi |
-|-----------------|----------------------|
-| Cần phát hiện bất thường tinh vi (deviation từ baseline) | Có thể dùng if/else đơn giản |
-| Cần dự đoán tương lai (độ ẩm, nhiệt độ) | Cần safety/absolute (ngưỡng chết người) |
-| Phân loại tín hiệu phức tạp | Cần giải thích bằng ngôn ngữ tự nhiên |
-| Dữ liệu có tính chu kỳ, lặp lại | Dataset quá nhỏ (< 100 mẫu) |
-
-### 9.2. Tác vụ ML 1: Phát hiện bất thường (Anomaly Detection)
-
-**Vấn đề:** Rule engine dùng threshold cứng (`nhiệt > 40°C`) — bỏ sót bất thường trong ngưỡng (vd: nhiệt 37°C nhưng tăng 5°C/giờ).
-
-**Giải pháp:** Học baseline tự động, phát hiện độ lệch.
-
-```
-Sensor stream 24/7
-    │
-    ▼
-┌─────────────────────────────┐
-│ Baseline Calculator (nhẹ)   │  ← Moving Average ± 3σ
-│ RAM: ~5 MB, CPU: <1%        │     20 dòng Python
-└──────────┬──────────────────┘
-           │ deviation score
-           ▼
-┌─────────────────────────────┐
-│ Anomaly Detector (trung bình)│  ← Isolation Forest / Autoencoder
-│ RAM: ~50 MB, CPU: ~2%       │     Chạy mỗi 5 phút
-└──────────┬──────────────────┘
-           │ alert
-           ▼
 ┌─────────────────────────────┐
 │ Rule Engine + LLM           │  ← Nếu cần phân tích sâu
 │ (threshold cứng cho safety) │     gọi AI Agent

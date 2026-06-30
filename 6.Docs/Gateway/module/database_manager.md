@@ -1,8 +1,8 @@
 # Database Manager — Thiết kế module
 
 > **Module:** `database_manager/`
-> **Phiên bản:** 2.0
-> **Ngày:** 12/06/2026
+> **Phiên bản:** 2.1
+> **Ngày:** 30/06/2026
 
 ---
 
@@ -153,6 +153,11 @@ class ReadingStore:
     async def get_all_latest() -> list[Reading]      # latest reading per device/sensor
     async def search_anomalies(threshold_sigma=2.0, baseline_days=30) -> list[AnomalyResult]
 
+    # Enrichment support (v2.0+)
+    async def get_history_for_enrichment(device_id, sensor_id, hours=24, limit=1000) -> list[dict]
+        # Returns last N hours of readings as [{timestamp, value, unit}]
+        # Used by EnrichmentPipeline for LLM context
+
     # Retention support
     async def open_retention_conn() -> tuple[Connection, bool]  # Separate connection for retention
 ```
@@ -163,6 +168,7 @@ class ReadingStore:
 - `DatabaseManager._handle_write()` — ghi dữ liệu mới
 - `FleetTools` — đọc history, anomalies, all_latest (đi tắt)
 - `SystemManager.start()` — gọi `init()` khi khởi động
+- `EnrichmentPipeline._get_history()` — lấy 24h context cho LLM enrichment
 
 **Schema SQLite thực tế:**
 

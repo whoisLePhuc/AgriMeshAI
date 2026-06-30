@@ -500,6 +500,58 @@ for t in tools:
 
 ---
 
+## 6. Enrichment Pipeline (v2.1+)
+
+**Module:** `ml_detector/enrichment.py`
+
+### Mục đích
+
+Khi `MLDetector` phát hiện bất thường, `EnrichmentPipeline` tự động bổ sung
+ngữ cảnh lịch sử 24h và gọi LLM (Qwen2.5 qua Ollama) để giải thích bằng
+tiếng Việt.
+
+### Luồng xử lý
+
+```
+alert_triggered (EventBus)
+    │
+    ▼
+EnrichmentPipeline.enqueue()  ─── asyncio.Queue (max 1000)
+    │
+    ▼
+_process_queue() — background task
+    │
+    ├── _get_history(device_id, sensor_id, hours=24)
+    │       └── ReadingStore.get_history_for_enrichment()
+    │
+    ├── [Luôn] Gắn historical_context vào alert
+    │
+    └── [Cố gắng] _call_llm(alert)
+            └── POST /v1/chat/completions → Ollama (qwen2.5:7b)
+                    ├── Thành công → alert có llm_explanation
+                    └── Thất bại → retry 3 lần (30s, 2min, 5min)
+```
+
+### Offline mode
+
+- LLM server không reachable → alert được lưu **không** có explanation
+- Retry queue tự động xử lý khi LLM online trở lại
+- Alert **không bao giờ** bị chờ enrichment
+
+### Cấu hình
+
+```python
+from ml_detector.enrichment import EnrichmentPipeline
+
+pipeline = EnrichmentPipeline(
+    store=store,
+    llm_api_url="http://100.125.217.6:11434/v1",  # Ollama endpoint
+)
+pipeline.start()
+```
+
+---
+
 ## Tham khảo
 
 - Model Context Protocol — modelcontextprotocol.io
