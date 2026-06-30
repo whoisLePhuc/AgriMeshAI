@@ -245,3 +245,22 @@ dist/
 *.pkl
 *.joblib
 *.onnx
+
+# ── OpenCode AI working directory ─────────────────────────────────
+.opencode/
+
+# ── Speckit spec & workflow files ─────────────────────────────────
+.specify/
+specs/
+
+# ── External submodule / vendored libraries ───────────────────────
+LoRaMesher/
+
+# ── PlatformIO build cache ────────────────────────────────────────
+.pio/
+.pioenvs/
+.piolibdeps/
+.pio/libdeps/
+
+# ── Speckit IDE data ──────────────────────────────────────────────
+.omo/
