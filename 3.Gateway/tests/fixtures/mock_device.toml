@@ -1,0 +1,31 @@
+[device]
+name = "mock_sensor"
+description = "Mock sensor device for integration testing — uses MockAdapter"
+
+[connection]
+protocol = "mock"
+timeout_ms = 1000
+mock_responses = { READ_TEMP = "25.5", READ_HUM = "65.0" }
+
+[[tools]]
+name = "get_temperature"
+description = "Read current temperature from mock sensor"
+command = "READ_TEMP"
+params = {}
+returns = { type = "number", description = "Temperature in °C" }
+
+[[tools]]
+name = "get_humidity"
+description = "Read current humidity from mock sensor"
+command = "READ_HUM"
+params = {}
+returns = { type = "number", description = "Humidity in %" }
+
+[recording]
+poll_interval_ms = 60000
+enabled = false
+
+[health]
+check_command = "PING"
+expected = "OK"
+interval_ms = 30000
